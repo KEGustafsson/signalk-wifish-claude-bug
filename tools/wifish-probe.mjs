@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
+import { performance } from 'node:perf_hooks';
 import {
   VERSION, DISCOVERY, SERVICE_SONAR, MsgId, REQUIRED,
   messageId, parseHeader, isWellFormed, parseAnnounce, checkService, parseUnit,
@@ -43,11 +44,14 @@ try {
     if (!m || port < 1 || port > 65535) throw new Error(`--sk: expected host:port, got ${values.sk}`);
     sk = { host: m[1], port };
   }
+  if (values.replay && sk) throw new Error('--replay does not send Signal K output; drop --sk');
   opts = { ...values, sk, keepalive: !values['no-keepalive'] };
 } catch (e) {
   console.error(`${e.message}\n\n${USAGE}`);
   process.exit(2);
 }
+// Monotonic ms for throttling/watchdog: the Jetson's wall clock may step when NTP/GPS sets it.
+const mono = () => performance.now();
 // npm run executes from the package root; resolve paths against where the user ran it.
 const userPath = (p) => path.resolve(process.env.INIT_CWD ?? process.cwd(), p);
 
@@ -68,7 +72,7 @@ skSock?.on('error', (e) => console.warn(`[sk] ${e.message}`));
 // Depth: on change, max 5 Hz, 5 s heartbeat. Temperature: max 1 Hz, 10 s heartbeat. null (no data) passes at once.
 const throttles = { [PATH.depth]: new Throttle({ minIntervalMs: 200, heartbeatMs: 5000 }), [PATH.waterTemp]: new Throttle({ minIntervalMs: 1000, heartbeatMs: 10_000 }) };
 function emitSk(p, value) {
-  if (!skSock || !throttles[p].shouldEmit(p, value, Date.now())) return;
+  if (!skSock || !throttles[p].shouldEmit(p, value, mono())) return;
   // One delta per datagram: the Signal K UDP input JSON.parses each datagram whole.
   skSock.send(JSON.stringify(toDelta([{ path: p, value }])), opts.sk.port, opts.sk.host, (e) => e && console.warn(`[sk] ${e.message}`));
 }
@@ -77,7 +81,7 @@ function emitSk(p, value) {
 const seen = new Map(); // message id -> count (well-formed messages only)
 const warned = new Set();
 const warnOnce = (key, msg) => { if (!warned.has(key)) { warned.add(key); console.warn(msg); } };
-const nameOf = (id) => Object.keys(MsgId).find((k) => MsgId[k] === id) ?? `0x${id.toString(16)}`;
+const nameOf = (id) => typeof id === 'string' ? id : Object.keys(MsgId).find((k) => MsgId[k] === id) ?? `0x${id.toString(16)}`;
 const asm = new PingAssembler();
 let tempCentiC, lastRx = 0, columns = 0;
 
@@ -86,7 +90,7 @@ function handleSonar(b, via) {
   if (!h) return;
   if (h.version !== VERSION) return warnOnce(`ver${h.id}`, `[warn] ${nameOf(h.id)} version ${h.version} != ${VERSION}, ignored`);
   if (!isWellFormed(b, h)) return warnOnce(`len${h.id}`, `[warn] ${nameOf(h.id)} malformed: ${b.length} bytes, header says ${h.length}; dropping these`);
-  lastRx = Date.now();
+  lastRx = mono();
   if (!seen.has(h.id)) console.log(`[${via}] first ${nameOf(h.id)} len=${h.length}`);
   seen.set(h.id, (seen.get(h.id) ?? 0) + 1);
 
@@ -111,7 +115,7 @@ function handleSonar(b, via) {
       asm.addResults(parsePingResults(b));
       break;
     case MsgId.PING_DATA: {
-      const col = asm.push(parsePingData(b));
+      const col = asm.push(parsePingData(b), mono());
       if (col && columns++ % 50 === 0) {
         const r = col.results;
         const max = col.samples.reduce((a, v) => (v > a ? v : a), 0);
@@ -168,7 +172,9 @@ function stopSession() {
   clearInterval(kaTimer); kaTimer = null;
   dataSock?.close(); dataSock = null;
   ctrlSock?.close(); ctrlSock = null;
-  if (service && iface && service.port === DISCOVERY.port) try { disc.dropMembership(service.group, iface); } catch {}
+  if (service && iface && service.port === DISCOVERY.port && service.group !== DISCOVERY.group) {
+    try { disc.dropMembership(service.group, iface); } catch {}
+  }
   for (const id of REQUIRED) seen.delete(id); // go back to "connecting" on the next session
 }
 
@@ -178,11 +184,12 @@ function maybeStart() {
   iface = ifaceFor(service.device);
   if (!iface) { console.error(`[init] no local interface on the subnet of ${service.device}; pass --iface`); return shutdown(1); }
   console.log(`[init] using interface ${iface}`);
-  lastRx = Date.now();
+  lastRx = mono();
 
   if (service.port === DISCOVERY.port) {
     // Same port as discovery: a second socket would receive (and decode) every datagram twice.
-    try { disc.addMembership(service.group, iface); } catch (e) { return fatal('data')(e); }
+    // Data on 224.0.0.1 itself: already joined for discovery.
+    if (service.group !== DISCOVERY.group) try { disc.addMembership(service.group, iface); } catch (e) { return fatal('data')(e); }
     console.log(`[data] joined ${service.group}:${service.port} on the discovery socket`);
   } else {
     dataSock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -207,10 +214,9 @@ function tick() {
 }
 
 function watchdog() {
-  const quiet = Date.now() - lastRx > 5000;
+  const quiet = mono() - lastRx > 5000;
   if (quiet && !stale) {
-    console.warn('[watchdog] no sonar data for 5 s; keepalive back to "connecting"');
-    for (const id of REQUIRED) seen.delete(id);
+    console.warn('[watchdog] no sonar data for 5 s');
     emitSk(PATH.depth, null);
   } else if (!quiet && stale) {
     console.log('[watchdog] data flowing again');

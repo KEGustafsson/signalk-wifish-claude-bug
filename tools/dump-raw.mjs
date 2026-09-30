@@ -49,7 +49,8 @@ for (const r of readRawLog(buf)) {
   if (id === null) continue;
   counts.set(id, (counts.get(id) ?? 0) + 1);
   if (idFilter !== null ? id !== idFilter : !hex) continue;
-  console.log(`${new Date(r.ts).toISOString()} ch=${r.channel} id=0x${id.toString(16)} len=${r.msg.length}`);
+  const when = Number.isFinite(new Date(r.ts).getTime()) ? new Date(r.ts).toISOString() : `ts=${r.ts}`;
+  console.log(`${when} ch=${r.channel} id=0x${id.toString(16)} len=${r.msg.length}`);
   if (hex) console.log(r.msg.toString('hex').replace(/(.{32})/g, '$1\n'));
 }
 console.log('\nmessage counts:');
