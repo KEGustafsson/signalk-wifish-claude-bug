@@ -45,7 +45,12 @@ function view(s: ChannelSettings | null): ChannelSettingsView | null {
   return { configIndex, name, rangeAuto, rangeShallowCm, rangeDeepCm, gainAuto, gain, contrastAuto, contrast, noiseFilterAuto, noiseFilter };
 }
 
+/** Engines created by this process, for unique epochs. */
+let engines = 0;
+
 export class Engine extends EventEmitter<EngineEvents> {
+  /** Unique per Engine and server run, so viewers can tell a restart from a reconnect. */
+  readonly epoch = `${Date.now().toString(36)}.${++engines}`;
   readonly session = new Sonar4Session();
   readonly transport: Transport;
   #opts: Required<Omit<EngineOptions, 'onDelta' | 'log'>> & Pick<EngineOptions, 'onDelta' | 'log'>;
@@ -159,6 +164,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     const sys = s.system;
     const st = s.systemStatus;
     return {
+      epoch: this.epoch,
       source: this.transport.kind,
       link: this.#link,
       message: this.#message,

@@ -229,6 +229,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
       data.on('error', (e) => this.#scheduleRetry(`data socket: ${e.message}`));
       data.on('message', (b) => this.#rx(b));
       data.bind(s.port, () => {
+        if (this.#data !== data) return; // closed or replaced meanwhile
         try { data.addMembership(s.group, iface); } catch (e) { this.#scheduleRetry(`join ${s.group}: ${(e as Error).message}`); }
       });
     }

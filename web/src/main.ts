@@ -33,6 +33,8 @@ const ORDER: ChannelName[] = ['sonar', 'downvision'];
 /** View forced while a settings popover is open (the app shows only that channel). */
 let tempView: ViewConfig | null = null;
 let backlogDone = false;
+/** Epoch of the plugin run the stores hold columns from; null right after a reset. */
+let epoch: string | null = null;
 
 /** Depth unit in use: the user's preference, else the sounder's setting, else metres. */
 function depthUnit(): DepthUnit {
@@ -555,6 +557,11 @@ window.setInterval(() => {
 
 /** Take a new plugin state: update toolbar, view, prefs and connection UI, then notify listeners. */
 function onState(s: WifishState | null): void {
+  // A new plugin run (e.g. server restart while the stream reconnected) numbers columns from 1 again.
+  if (s && s.epoch !== epoch) {
+    if (epoch !== null) resetHistory();
+    epoch = s.epoch;
+  }
   const prevWifish = isWifish();
   state = s;
   btnSettings.hidden = !isWifish();
@@ -584,6 +591,13 @@ const ctx: Ctx = {
   onState(cb) { listeners.add(cb); return () => listeners.delete(cb); },
 };
 
+/** Clear the stores and return the traces to live and unzoomed. */
+function resetHistory(): void {
+  for (const s of Object.values(stores)) s.clear();
+  for (const t of Object.values(traces)) { t.scrollTo(null); t.resetZoom(); }
+  paintPause();
+}
+
 let toastTimer: number | undefined;
 /** Show a transient status message for 3.5 s (creating the toast element on first use). */
 function toast(msg: string): void {
@@ -609,11 +623,10 @@ const stream = new PluginStream({
     if (t.live || t.zoomed) t.invalidate();
     if (backlogDone && stores[c.ch].cols.length === 1) paintConnection();
   },
-  /** Plugin history restarted: clear the stores and return the traces to live and unzoomed. */
+  /** Plugin history restarted: the next state's epoch is taken as the new run's. */
   reset() {
-    for (const s of Object.values(stores)) s.clear();
-    for (const t of Object.values(traces)) { t.scrollTo(null); t.resetZoom(); }
-    paintPause();
+    resetHistory();
+    epoch = null;
   },
   /** Backlog replay finished; repaint the connection state. */
   live() {

@@ -20,6 +20,13 @@ class FakeTransport extends EventEmitter<TransportEvents> implements Transport {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('Engine', () => {
+  test('state carries an epoch unique to the engine, so viewers detect a restart', () => {
+    const a = new Engine(new FakeTransport());
+    const b = new Engine(new FakeTransport());
+    expect(a.state().epoch).toBe(a.state().epoch);
+    expect(a.state().epoch).not.toBe(b.state().epoch);
+  });
+
   test('publishes depth with the offset convention and temperature', () => {
     const t = new FakeTransport();
     const deltas: Delta[] = [];

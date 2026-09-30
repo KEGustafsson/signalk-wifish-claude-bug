@@ -25,6 +25,8 @@ export interface ChannelSettingsView {
 }
 
 export interface WifishState {
+  /** Identifies the plugin run (engine instance); a change means column numbering restarted. */
+  epoch: string;
   source: 'device' | 'demo' | 'replay';
   link: LinkState;
   message: string;
