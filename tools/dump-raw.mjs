@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Dump a raw capture written by wifish-probe.mjs --log (format: lib/rawlog.mjs).
+// Dump a raw capture written by wifish-probe.mjs --log (format: src/rawlog.ts; run `npm run build:server` first).
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { readRawLog } from '../lib/rawlog.mjs';
-import { messageId } from '../lib/sonar4.mjs';
+import { readRawLog } from '../dist/rawlog.js';
+import { messageId } from '../dist/sonar4.js';
 
 const USAGE = `Usage: dump-raw <raw.bin> [--id 0xNNNNNN] [--hex]
   (no flags)   per-id message counts only

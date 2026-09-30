@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Wi-Fish "Sonar4" probe — discovery, keepalive, depth/temp decode, raw logging.
-// Spec: docs/PROTOCOL.md. Decoding lives in lib/sonar4.mjs. No dependencies.
+// Spec: docs/PROTOCOL.md. Decoding lives in src/sonar4.ts (run `npm run build:server` first).
 
 import dgram from 'node:dgram';
 import os from 'node:os';
@@ -13,9 +13,9 @@ import {
   VERSION, DISCOVERY, SERVICE_SONAR, MsgId, REQUIRED,
   messageId, parseHeader, isWellFormed, parseAnnounce, checkService, parseUnit,
   parseBottom, parseEnv, parseError, parsePingResults, parsePingData, buildKeepalive, PingAssembler,
-} from '../lib/sonar4.mjs';
-import { PATH, cmToM, centiCToK, toDelta, Throttle } from '../lib/signalk.mjs';
-import { CHANNEL, encodeRecord, readRawLog } from '../lib/rawlog.mjs';
+} from '../dist/sonar4.js';
+import { PATH, cmToM, centiCToK, toDelta, Throttle } from '../dist/signalk.js';
+import { CHANNEL, encodeRecord, readRawLog } from '../dist/rawlog.js';
 
 const USAGE = `Usage: wifish-probe [options]
   --iface <ipv4>     local WLAN address (default: the 192.x address on the sonar's subnet)

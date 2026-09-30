@@ -1,0 +1,89 @@
+// Stand-alone server for the web app, without a Signal K server:
+//   node dist/devserver.js --demo [--wifish] [--port 3000]
+//   node dist/devserver.js --device [--iface 192.168.x.y] [--passive]
+//   node dist/devserver.js --replay raw.bin
+// Serves public/ at / and /signalk-wifish/, the API at /plugins/signalk-wifish/, and
+// prints Signal K deltas with --deltas.
+
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { parseArgs } from 'node:util';
+import { plugin, type PluginConfig } from './plugin';
+import { PLUGIN_ID } from './shared/api';
+
+const { values } = parseArgs({
+  strict: true,
+  options: {
+    demo: { type: 'boolean', default: false },
+    wifish: { type: 'boolean', default: false },
+    device: { type: 'boolean', default: false },
+    iface: { type: 'string' },
+    passive: { type: 'boolean', default: false },
+    replay: { type: 'string' },
+    port: { type: 'string', default: '3000' },
+    host: { type: 'string', default: '0.0.0.0' },
+    deltas: { type: 'boolean', default: false },
+    help: { type: 'boolean', short: 'h', default: false },
+  },
+});
+if (values.help) {
+  console.log('Usage: devserver [--demo [--wifish] | --device [--iface ip] [--passive] | --replay file] [--port 3000] [--deltas]');
+  process.exit(0);
+}
+
+const cfg: PluginConfig = values.replay
+  ? { source: 'replay', replayFile: path.resolve(process.env.INIT_CWD ?? process.cwd(), values.replay) }
+  : values.device
+    ? { source: 'device', iface: values.iface, keepalive: !values.passive }
+    : { source: 'demo', demoModel: values.wifish ? 'wifish' : 'dragonfly' };
+
+const log = (...a: unknown[]) => console.log('[wifish]', ...a);
+const p = plugin({
+  handleMessage: (_id, delta) => { if (values.deltas) console.log(JSON.stringify(delta)); },
+  setPluginStatus: (m) => log('status:', m),
+  setPluginError: (m) => log('error:', m),
+  debug: (m) => log(m),
+});
+
+type Handler = (req: http.IncomingMessage & { path?: string }, res: http.ServerResponse, next: (e?: unknown) => void) => void;
+let apiHandler: Handler | null = null;
+p.registerWithRouter({ use: (fn) => { apiHandler = fn; } });
+
+const publicDir = path.resolve(__dirname, '..', 'public');
+const TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.json': 'application/json', '.map': 'application/json',
+};
+
+function serveStatic(urlPath: string, res: http.ServerResponse): void {
+  const rel = decodeURIComponent(urlPath).replace(/^\/+/, '') || 'index.html';
+  const file = path.resolve(publicDir, rel);
+  if (!file.startsWith(publicDir + path.sep) && file !== publicDir) { res.statusCode = 403; res.end(); return; }
+  fs.readFile(fs.existsSync(file) && fs.statSync(file).isDirectory() ? path.join(file, 'index.html') : file, (err, data) => {
+    if (err) { res.statusCode = 404; res.end('not found'); return; }
+    res.setHeader('Content-Type', TYPES[path.extname(file)] ?? 'application/octet-stream');
+    res.end(data);
+  });
+}
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  const pluginRoot = `/plugins/${PLUGIN_ID}`;
+  if (url.pathname.startsWith(pluginRoot + '/') && apiHandler) {
+    const r = req as http.IncomingMessage & { path?: string };
+    r.path = url.pathname.slice(pluginRoot.length);
+    apiHandler(r, res, (e) => { res.statusCode = e ? 500 : 404; res.end(e ? String(e) : 'not found'); });
+    return;
+  }
+  const appRoot = `/${PLUGIN_ID}`;
+  serveStatic(url.pathname.startsWith(appRoot) ? url.pathname.slice(appRoot.length) : url.pathname, res);
+});
+
+p.start(cfg);
+server.listen(Number(values.port), values.host, () => {
+  log(`web app on http://localhost:${values.port}/  (source: ${cfg.source})`);
+});
+const shutdown = () => { p.stop(); server.close(); process.exit(0); };
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

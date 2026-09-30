@@ -1,15 +1,70 @@
 {
   "name": "signalk-wifish",
-  "version": "0.1.0",
-  "description": "Open interface to Raymarine Wi-Fish / Dragonfly Pro Wi-Fi sonar for Signal K",
-  "type": "module",
-  "private": true,
-  "engines": { "node": ">=18.3" },
-  "scripts": {
-    "probe": "node tools/wifish-probe.mjs",
-    "dump": "node tools/dump-raw.mjs",
-    "test": "node --test"
+  "version": "0.2.0",
+  "description": "Raymarine Wi-Fish / Dragonfly Pro Wi-Fi sonar for Signal K: depth, water temperature and a live echogram web app",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "!dist/devserver.*",
+    "public",
+    "!public/*.map",
+    "tools",
+    "docs",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
   },
-  "keywords": ["signalk", "sonar", "raymarine", "wi-fish", "dragonfly", "depth"],
-  "license": "MIT"
+  "scripts": {
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsc -p tsconfig.json",
+    "build:web": "node web/build.mjs",
+    "watch:web": "node web/build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
+    "dev": "npm run build && node dist/devserver.js --demo",
+    "test": "vitest run",
+    "prepare": "npm run build",
+    "preprobe": "npm run build:server",
+    "probe": "node tools/wifish-probe.mjs",
+    "predump": "npm run build:server",
+    "dump": "node tools/dump-raw.mjs"
+  },
+  "keywords": [
+    "signalk-node-server-plugin",
+    "signalk-webapp",
+    "signalk-category-instruments",
+    "sonar",
+    "echogram",
+    "fishfinder",
+    "raymarine",
+    "wi-fish",
+    "dragonfly",
+    "depth"
+  ],
+  "signalk": {
+    "appIcon": "./public/icon.svg",
+    "displayName": "Wi-Fish Sonar",
+    "screenshots": [
+      "./docs/screenshot.jpg",
+      "./docs/screenshot-settings.jpg"
+    ]
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "typescript": "~5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KEGustafsson/signalk-wifish.git"
+  },
+  "homepage": "https://github.com/KEGustafsson/signalk-wifish#readme",
+  "bugs": {
+    "url": "https://github.com/KEGustafsson/signalk-wifish/issues"
+  },
+  "author": "Karl-Erik Gustafsson"
 }
