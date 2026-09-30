@@ -22,12 +22,14 @@ export interface DemoOptions {
 const SESSION = 0x5eed;
 const METRES = DEPTH_UNITS[1];
 
+/** Zeroed datagram of `len` bytes with the common header (id, length, version, session) filled in. */
 function header(id: number, len: number): { b: Uint8Array; v: DataView } {
   const b = new Uint8Array(len);
   const v = new DataView(b.buffer);
   v.setUint32(0, id, true); v.setUint32(4, len, true); v.setUint32(8, VERSION, true); v.setUint32(12, SESSION, true);
   return { b, v };
 }
+/** Write an ASCII string into a zeroed `max`-byte field, truncated to leave its NUL terminator. */
 function putStr(b: Uint8Array, off: number, s: string, max: number): void {
   for (let i = 0; i < Math.min(s.length, max - 1); i++) b[off + i] = s.charCodeAt(i) & 0xff;
 }
@@ -64,6 +66,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
   #tempCentiC = 1530;
   #autoEnd = new Map<number, number>();
 
+  /** Build the demo unit's settings: CHIRP and DownVision channels, the other ping configs disabled, metres. */
   constructor(opts: DemoOptions = {}) {
     super();
     this.model = opts.model ?? 'dragonfly';
@@ -85,6 +88,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     this.#sys = b;
   }
 
+  /** Channel settings datagram for ping config `index`: enabled, auto range 0-20 m, auto gain/contrast/noise. */
   #makeChannel(index: number, name: string): Uint8Array {
     const { b, v } = header(MsgId.CHAN_SETTINGS, CHAN_SETTINGS_LEN);
     b[CS.INDEX] = index;
@@ -99,6 +103,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     return b;
   }
 
+  /** Report 'connecting', then send status every second and pings at the ping rate; 'connected' right after. */
   start(): void {
     if (this.#timers.length) return;
     this.emit('link', 'connecting', 'Connecting to demo sonar');
@@ -108,6 +113,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     this.#connected = setImmediate(() => { this.#connected = null; this.emit('link', 'connected', 'Demo sonar'); });
   }
 
+  /** Cancel all timers and report the link 'offline'. */
   stop(): void {
     if (this.#connected) clearImmediate(this.#connected);
     this.#connected = null;
@@ -131,8 +137,10 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     }
   }
 
+  /** Transducer offset from the current system settings, cm. */
   get #offsetCm(): number { return new DataView(this.#sys.buffer).getInt32(SS.TRANSDUCER_OFFSET, true); }
 
+  /** Once-a-second status burst: unit, environment (water temp), errors, system status and all settings. */
   #broadcast(): void {
     const unit = new Uint8Array(52);
     const uv = new DataView(unit.buffer);
@@ -168,6 +176,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     return Math.max(250, d);
   }
 
+  /** Move one ping along track, occasionally spawning fish and trees ahead and dropping those passed. */
   #advanceScene(): void {
     this.#x++;
     const x = this.#x;
@@ -180,6 +189,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     this.#trees = this.#trees.filter((t) => t.x + t.width > x - 10);
   }
 
+  /** One ping: advance the scene, send each channel's results and data, then the bottom depth message. */
   #ping(): void {
     this.#advanceScene();
     const bottom = this.#bottomAt(this.#x);
@@ -192,6 +202,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     this.emit('datagram', bot.b);
   }
 
+  /** Send one channel's ping results and its column, split into 400-sample PING_DATA segments. */
   #pingChannel(ch: number, bottom: number): void {
     const cfg = this.#chan.get(ch)!;
     const cv = new DataView(cfg.buffer);
@@ -234,6 +245,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     }
   }
 
+  /** Synthesize an `n`-sample column down to `endCm`, shaped by the channel's gain, contrast and noise filter. */
   #column(ch: number, n: number, endCm: number, bottom: number, cfg: Uint8Array): Uint8Array {
     const gain = cfg[CS.GAIN_AUTO] === 1 ? 50 : cfg[CS.GAIN];
     const contrast = cfg[CS.CONTRAST_AUTO] === 1 ? 50 : cfg[CS.CONTRAST];
@@ -291,6 +303,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     return out;
   }
 
+  /** Max-blend a Gaussian echo centred on sample `centre` into the column. */
   #blob(out: Uint8Array, centre: number, radius: number, strength: number): void {
     const from = Math.max(0, Math.floor(centre - radius * 2));
     const to = Math.min(out.length - 1, Math.ceil(centre + radius * 2));

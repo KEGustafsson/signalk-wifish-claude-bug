@@ -28,6 +28,7 @@ export function lut(id: number): Uint32Array {
   if (l) return l;
   const p = PALETTES[id] ?? PALETTES[4];
   const stops = p.stops.split(' ').map((h) => [0, 2, 4].map((k) => parseInt(h.slice(k, k + 2), 16)));
+  /** Level of gradient stop `i` (every 16, the last one at 255). */
   const at = (i: number) => (i < 16 ? i * 16 : 255);
   l = new Uint32Array(256);
   for (let i = 0; i < 256; i++) {

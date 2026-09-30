@@ -38,6 +38,7 @@ const cfg: PluginConfig = values.replay
     ? { source: 'device', iface: values.iface, keepalive: !values.passive }
     : { source: 'demo', demoModel: values.wifish ? 'wifish' : 'dragonfly' };
 
+/** Console log with a [wifish] prefix. */
 const log = (...a: unknown[]) => console.log('[wifish]', ...a);
 const p = plugin({
   handleMessage: (_id, delta) => { if (values.deltas) console.log(JSON.stringify(delta)); },
@@ -56,6 +57,7 @@ const TYPES: Record<string, string> = {
   '.png': 'image/png', '.json': 'application/json', '.map': 'application/json',
 };
 
+/** Serve a file from public/ (index.html for directories), refusing paths that escape it. */
 function serveStatic(urlPath: string, res: http.ServerResponse): void {
   let rel: string;
   try {
@@ -83,6 +85,7 @@ const server = http.createServer((req, res) => {
   }
 });
 
+/** Send plugin paths to the plugin's API handler and everything else, minus the app prefix, to static files. */
 function route(req: http.IncomingMessage, res: http.ServerResponse): void {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const pluginRoot = `/plugins/${PLUGIN_ID}`;
@@ -100,6 +103,7 @@ p.start(cfg);
 server.listen(Number(values.port), values.host, () => {
   log(`web app on http://localhost:${values.port}/  (source: ${cfg.source})`);
 });
+/** Stop the plugin and the HTTP server, then exit. */
 const shutdown = () => { p.stop(); server.close(); process.exit(0); };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

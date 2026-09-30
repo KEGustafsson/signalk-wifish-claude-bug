@@ -21,6 +21,7 @@ export const MAX_UNREAD_BYTES = 4 * 1024 * 1024;
 export const MAX_STREAMS = 16;
 type Res = ServerResponse & { flush?: () => void };
 
+/** Send a JSON response with the given status, marked uncacheable. */
 function sendJson(res: Res, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
@@ -28,6 +29,7 @@ function sendJson(res: Res, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** Parse the JSON request body (or reuse the server's already-parsed one); rejects bodies over 16 KiB. */
 async function readBody(req: Req): Promise<unknown> {
   // Already consumed and parsed by the server's body parser.
   if (req.body !== undefined && req.readableEnded) return req.body;
@@ -73,6 +75,7 @@ export function parseChannelPatch(body: unknown): ChannelPatch | string {
   return Object.keys(out).length ? out : 'empty patch';
 }
 
+/** Validated system patch, or an error string. */
 export function parseSystemPatch(body: unknown): SystemPatch | string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return 'expected a JSON object';
   const b = body as Record<string, unknown>;
@@ -167,7 +170,9 @@ export class Api {
       this.#broadcast('state', null);
       return;
     }
+    /** Forward engine state changes to every viewer. */
     const onState = (s: WifishState) => this.#broadcast('state', s);
+    /** Forward each new echogram column to every viewer. */
     const onCol = (c: ColumnMessage) => this.#broadcast('col', c);
     engine.on('state', onState);
     engine.on('column', onCol);
@@ -176,6 +181,7 @@ export class Api {
     this.#broadcast('state', engine.state());
   }
 
+  /** Detach from the engine and end every viewer's event stream. */
   close(): void {
     this.#unsub?.();
     this.#unsub = null;
@@ -184,6 +190,7 @@ export class Api {
     this.#clients.clear();
   }
 
+  /** Open an SSE stream: current state, the column backlog, a 'live' marker, then live events and pings. */
   #stream(req: Req, res: Res): void {
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/event-stream');
@@ -198,16 +205,19 @@ export class Api {
     this.#write(res, 'live', null);
     this.#clients.set(res, res.writableLength + MAX_UNREAD_BYTES);
     const ping = setInterval(() => { if (!res.destroyed) { res.write(': ping\n\n'); res.flush?.(); } }, 15_000);
+    /** Stop pinging and forget the viewer once its connection closes. */
     const done = () => { clearInterval(ping); this.#clients.delete(res); };
     req.on('close', done);
     res.on('close', done);
   }
 
+  /** Write one SSE event and flush it past any compression buffering. */
   #write(res: Res, event: string, data: unknown): void {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     res.flush?.(); // compression middleware buffers otherwise
   }
 
+  /** Send an event to every viewer, dropping any whose unread output exceeds its budget. */
   #broadcast(event: string, data: unknown): void {
     for (const [c, budget] of this.#clients) {
       // A viewer that stopped reading (stalled proxy, suspended tab) would buffer forever.

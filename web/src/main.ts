@@ -14,6 +14,7 @@ import type { ChannelName, WifishState } from '../../src/shared/api';
 
 declare const __VERSION__: string;
 
+/** Typed shorthand for document.getElementById. */
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
 // ------------------------------------------------------------------ model
@@ -33,21 +34,25 @@ const ORDER: ChannelName[] = ['sonar', 'downvision'];
 let tempView: ViewConfig | null = null;
 let backlogDone = false;
 
+/** Depth unit in use: the user's preference, else the sounder's setting, else metres. */
 function depthUnit(): DepthUnit {
   if (prefs.depthUnit) return unitById(prefs.depthUnit);
   return state?.system ? unitByCode(state.system.depthUnit) : unitById('m');
 }
 
+/** True when the connected unit is a Wi-Fish (DownVision only, settings button in the toolbar). */
 function isWifish(): boolean {
   return !!state?.unit?.wifish;
 }
 
+/** Channels that can be shown: DownVision on a Wi-Fish, else the active ones (both if none is active). */
 function availableChannels(): ChannelName[] {
   if (isWifish()) return ['downvision'];
   const a = ORDER.filter((c) => state?.active[c]);
   return a.length ? a : ORDER;
 }
 
+/** View actually shown: the temporary settings view, the only available channel, or the saved view. */
 function effectiveView(): ViewConfig {
   if (tempView) return tempView;
   const avail = availableChannels();
@@ -60,6 +65,7 @@ function effectiveView(): ViewConfig {
 const tracesEl = $<HTMLDivElement>('traces');
 tracesEl.append(traces.sonar.el, Object.assign(document.createElement('div'), { className: 'separator' }), traces.downvision.el);
 
+/** Show or hide the traces for the effective view and mark them for redraw. */
 function applyView(): void {
   const v = effectiveView();
   tracesEl.className = `traces ${v}`;
@@ -86,6 +92,7 @@ function unitChanged(u: DepthUnit): void {
   ctx.sendChannel(ch, { rangeAuto: cs.rangeAuto, rangeShallowCm: shallow, rangeDeepCm: deep }).catch(() => {});
 }
 
+/** Push the prefs (unit, palettes, offset, depth lines, A-scope, speed) to the traces and repaint the databox. */
 function applyPrefs(): void {
   const u = depthUnit();
   if (state) unitChanged(u);
@@ -118,8 +125,10 @@ btnMore.innerHTML = ICONS.more;
 btnFF.innerHTML = ICONS.fastForward;
 for (const t of Object.values(traces)) t.gear.innerHTML = ICONS.gear;
 
+/** True when any trace is held on history instead of following new pings. */
 const paused = () => Object.values(traces).some((t) => !t.live);
 
+/** Update the pause/play button; the fast-forward button and history scrollbar show only while paused. */
 function paintPause(): void {
   const p = paused();
   btnPause.innerHTML = p ? ICONS.play : ICONS.pause;
@@ -129,6 +138,7 @@ function paintPause(): void {
   $('history-scroll').hidden = !p;
 }
 
+/** Pause or resume all traces together and update the toolbar. */
 function setPaused(p: boolean): void {
   for (const t of Object.values(traces)) t.pause(p);
   paintPause();
@@ -142,6 +152,7 @@ btnViews.addEventListener('click', () => {
 });
 
 let settingsDialog: DialogHandle | null = null;
+/** Open a channel's sonar settings popover; in split view only that channel is shown while it is open. */
 function openSonarSettings(ch: ChannelName, anchor: HTMLElement): void {
   settingsDialog?.close();
   hideGears();
@@ -162,10 +173,12 @@ btnMore.addEventListener('click', () => {
 // ------------------------------------------------------------------ settings gear on tap (app: GestureContainer)
 
 let gearTimer: number | undefined;
+/** Hide every trace's settings gear and cancel the auto-hide timer. */
 function hideGears(): void {
   for (const t of Object.values(traces)) t.gear.classList.remove('shown');
   window.clearTimeout(gearTimer);
 }
+/** Toggle a trace's settings gear on tap; it hides again after 5 s (never shown on a Wi-Fish). */
 function showGear(ch: ChannelName): void {
   if (isWifish()) return; // the Wi-Fish has its settings button in the toolbar
   const t = traces[ch];
@@ -199,6 +212,7 @@ function zoomAll(factor: number, clientX: number, clientY: number): void {
   for (const tr of shownTraces()) tr.zoomBy(factor, tr.trackBottom ? undefined : localY);
 }
 
+/** Visible trace under the given client point, if any. */
 function traceAt(x: number, y: number): TraceView | null {
   for (const t of Object.values(traces)) {
     if (t.el.hidden) continue;
@@ -207,6 +221,7 @@ function traceAt(x: number, y: number): TraceView | null {
   }
   return null;
 }
+/** Traces not hidden by the current view. */
 const shownTraces = () => Object.values(traces).filter((t) => !t.el.hidden);
 
 tracesEl.addEventListener('pointerdown', (e) => {
@@ -273,6 +288,10 @@ tracesEl.addEventListener('pointermove', (e) => {
   }
 });
 
+/**
+ * Finish a pointer: a tap shows the gear, a double tap resets the zoom; when the last pointer lifts
+ * the gesture ends and a pinched speed is saved.
+ */
 function pointerEnd(e: PointerEvent): void {
   const p = pointers.get(e.pointerId);
   pointers.delete(e.pointerId);
@@ -330,6 +349,7 @@ tracesEl.addEventListener('wheel', (e) => {
 
 tracesEl.addEventListener('contextmenu', (e) => e.preventDefault());
 
+/** Long press: show depth, bottom, water temperature and time of the ping under the point, paused meanwhile. */
 function showDetails(x: number, y: number): void {
   const t = traceAt(x, y);
   if (!t) return;
@@ -355,9 +375,11 @@ function showDetails(x: number, y: number): void {
 
 const scrollEl = $<HTMLDivElement>('history-scroll');
 const thumb = scrollEl.querySelector<HTMLDivElement>('.thumb')!;
+/** Trace the history scrollbar follows (the first one shown). */
 function primary(): TraceView {
   return shownTraces()[0] ?? traces.downvision;
 }
+/** Size and place the scrollbar thumb for the visible part of the primary trace's history. */
 function paintScrollbar(): void {
   if (scrollEl.hidden) return;
   const t = primary();
@@ -372,6 +394,7 @@ function paintScrollbar(): void {
 }
 scrollEl.addEventListener('pointerdown', (e) => {
   scrollEl.setPointerCapture(e.pointerId);
+  /** Scroll all traces so the thumb lands under the pointer. */
   const move = (ev: PointerEvent) => {
     const t = primary();
     const r = scrollEl.getBoundingClientRect();
@@ -384,6 +407,7 @@ scrollEl.addEventListener('pointerdown', (e) => {
   move(e);
   scrollEl.addEventListener('pointermove', move);
   // pointercancel (e.g. a system gesture) ends the drag too, or the listener would leak.
+  /** Stop tracking the drag and remove its listeners. */
   const end = () => {
     scrollEl.removeEventListener('pointermove', move);
     scrollEl.removeEventListener('pointerup', end);
@@ -437,6 +461,7 @@ btnSnapshot.addEventListener('click', () => {
 
 let depthShownAt = 0;
 let depthTimer: number | undefined;
+/** Update the water temperature readout, and the depth at most once per second. */
 function paintDatabox(): void {
   // The app refreshes the depth readout at most once per second.
   const now = performance.now();
@@ -452,6 +477,7 @@ function paintDatabox(): void {
   $('temp-frac').textContent = t.frac;
   $('temp-unit').textContent = t.symbol;
 }
+/** Write the current depth into the databox. */
 function paintDepth(): void {
   const d = formatDepth(state?.depthCm ?? null, depthUnit());
   $('depth').textContent = `${d.whole}.`;
@@ -467,6 +493,7 @@ let lostShown = false;
 let offlineTimer: number | undefined;
 let streamOk = true;
 
+/** Update the connecting/offline screens, source label, and the lost-connection and low-voltage dialogs. */
 function paintConnection(): void {
   const s = state;
   const anyData = stores.sonar.cols.length + stores.downvision.cols.length > 0;
@@ -526,6 +553,7 @@ window.setInterval(() => {
   else el.hidden = true;
 }, 2000);
 
+/** Take a new plugin state: update toolbar, view, prefs and connection UI, then notify listeners. */
 function onState(s: WifishState | null): void {
   const prevWifish = isWifish();
   state = s;
@@ -543,17 +571,21 @@ function onState(s: WifishState | null): void {
 const ctx: Ctx = {
   state: () => state,
   depthUnit,
+  /** Change a channel's settings on the plugin and take the returned state; errors are toasted and rethrown. */
   async sendChannel(ch, patch) {
     try { onState(await setChannel(ch, patch)); } catch (e) { toast((e as Error).message); throw e; }
   },
+  /** Change system settings on the plugin and take the returned state; errors are toasted and rethrown. */
   async sendSystem(patch) {
     try { onState(await setSystem(patch)); } catch (e) { toast((e as Error).message); throw e; }
   },
   applyPrefs: () => { applyPrefs(); applyView(); },
+  /** Subscribe to state changes; returns an unsubscribe function. */
   onState(cb) { listeners.add(cb); return () => listeners.delete(cb); },
 };
 
 let toastTimer: number | undefined;
+/** Show a transient status message for 3.5 s (creating the toast element on first use). */
 function toast(msg: string): void {
   let el = document.querySelector<HTMLDivElement>('.toast');
   if (!el) {
@@ -570,21 +602,25 @@ function toast(msg: string): void {
 
 const stream = new PluginStream({
   state: onState,
+  /** Store an incoming ping column and redraw its trace if it is live or zoomed. */
   column(c) {
     stores[c.ch].add(c);
     const t = traces[c.ch];
     if (t.live || t.zoomed) t.invalidate();
     if (backlogDone && stores[c.ch].cols.length === 1) paintConnection();
   },
+  /** Plugin history restarted: clear the stores and return the traces to live and unzoomed. */
   reset() {
     for (const s of Object.values(stores)) s.clear();
     for (const t of Object.values(traces)) { t.scrollTo(null); t.resetZoom(); }
     paintPause();
   },
+  /** Backlog replay finished; repaint the connection state. */
   live() {
     backlogDone = true;
     paintConnection();
   },
+  /** Stream connected or dropped; after a drop the backlog is replayed again. */
   connection(ok) {
     streamOk = ok;
     if (!ok) backlogDone = false;
@@ -594,6 +630,7 @@ const stream = new PluginStream({
 
 // ------------------------------------------------------------------ render loop
 
+/** Animation frame: draw traces that changed and the scrollbar, then schedule the next frame. */
 function frame(now: number): void {
   for (const t of Object.values(traces)) t.draw(now);
   paintScrollbar();

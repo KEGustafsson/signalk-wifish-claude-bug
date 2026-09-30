@@ -12,6 +12,7 @@ export interface Col {
   samples: Uint8Array;
 }
 
+/** Base64 to bytes. */
 function decode(b64: string): Uint8Array {
   const s = atob(b64);
   const out = new Uint8Array(s.length);
@@ -24,9 +25,12 @@ export class ColumnStore {
   /** The app keeps 40 × 256 columns per channel (z.b). */
   constructor(readonly channel: ChannelName, readonly max = 10_240) {}
 
+  /** Number of the oldest held column, or 0 when empty. */
   get first(): number { return this.cols.length ? this.cols[0].n : 0; }
+  /** Number of the newest held column, or 0 when empty. */
   get last(): number { return this.cols.length ? this.cols[this.cols.length - 1].n : 0; }
 
+  /** Append a column (skipping duplicates, restarting on renumbering) and trim to `max` columns. */
   add(m: ColumnMessage): void {
     const last = this.cols[this.cols.length - 1];
     if (last && m.n <= last.n) {
@@ -57,5 +61,6 @@ export class ColumnStore {
     return undefined;
   }
 
+  /** Drop all held columns. */
   clear(): void { this.cols.length = 0; }
 }

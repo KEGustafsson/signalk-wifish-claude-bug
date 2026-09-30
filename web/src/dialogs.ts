@@ -7,6 +7,10 @@ import { DEPTH_UNITS, presetCm, type DepthUnit } from '../../src/shared/units';
 import type { ChannelName, ChannelPatch, ChannelSettingsView, SystemPatch, WifishState } from '../../src/shared/api';
 import type { ViewConfig } from './prefs';
 
+/**
+ * Create an element with attributes (`class`, `html` = innerHTML, true = empty attribute,
+ * false/undefined = omitted) and children.
+ */
 export const h = <K extends keyof HTMLElementTagNameMap>(
   tag: K, attrs: Record<string, string | boolean | number | undefined> = {}, ...kids: (Node | string | null | undefined)[]
 ): HTMLElementTagNameMap[K] => {
@@ -40,6 +44,10 @@ export interface DialogOptions {
 let dialogIds = 0;
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/**
+ * Show `content` in a dialog or anchored popover; handles focus, Tab trapping,
+ * outside-click dismiss and the Escape stack.
+ */
 export function openDialog(content: Node, opts: DialogOptions = {}): DialogHandle {
   const layer = h('div', { class: `dialog-layer${opts.modal ? ' modal' : ''}` });
   const box = h('div', { class: `dialog ${opts.className ?? ''}`, role: 'dialog', 'aria-modal': opts.modal ? 'true' : undefined, tabindex: -1 });
@@ -53,8 +61,9 @@ export function openDialog(content: Node, opts: DialogOptions = {}): DialogHandl
   document.body.append(layer);
   const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   let open = true;
+  /** Visible, enabled focusable elements inside the dialog. */
   const focusables = () => [...box.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((e) => e.offsetParent !== null);
-  // Keep Tab inside a modal dialog.
+  /** Keep Tab inside a modal dialog: wrap focus between its first and last focusable elements. */
   const trap = (e: KeyboardEvent) => {
     if (e.key !== 'Tab' || !opts.modal || stack[stack.length - 1] !== handle) return;
     const f = focusables();
@@ -64,10 +73,13 @@ export function openDialog(content: Node, opts: DialogOptions = {}): DialogHandl
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   };
   document.addEventListener('keydown', trap);
+  /** Re-position an anchored popover when the window size changes. */
   const onResize = () => place?.();
   const handle: DialogHandle = {
     el: box,
+    /** False once the dialog has been closed. */
     get open() { return open; },
+    /** Remove the dialog and its listeners, call `onClose`, and return focus to where it was; idempotent. */
     close() {
       if (!open) return;
       open = false;
@@ -107,6 +119,7 @@ export function openDialog(content: Node, opts: DialogOptions = {}): DialogHandl
   return handle;
 }
 
+/** Close every open dialog and popover. */
 export function closeAll(): void {
   for (const d of [...stack]) d.close();
 }
@@ -131,6 +144,7 @@ export function messageBox(title: string, text: string, buttons: { label: string
 
 const VALUE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']);
 
+/** 0..100 range input; `onStart` fires when the user starts adjusting it (pointer or a value-changing key). */
 function slider(value: number, onInput: (v: number) => void, onStart: () => void): HTMLInputElement {
   const s = h('input', { type: 'range', min: 0, max: 100, step: 1, value, class: 'slider' });
   s.addEventListener('pointerdown', onStart);
@@ -140,6 +154,7 @@ function slider(value: number, onInput: (v: number) => void, onStart: () => void
   return s;
 }
 
+/** Labelled checkbox that reports changes to `onChange`. */
 function checkbox(checked: boolean, onChange: (v: boolean) => void, label: string): HTMLInputElement {
   const c = h('input', { type: 'checkbox', class: 'check', 'aria-label': label });
   c.checked = checked;
@@ -147,6 +162,7 @@ function checkbox(checked: boolean, onChange: (v: boolean) => void, label: strin
   return c;
 }
 
+/** On/off switch (a checkbox with role=switch, styled as a track and thumb). */
 export function toggle(checked: boolean, onChange: (v: boolean) => void, label: string): HTMLLabelElement {
   const input = h('input', { type: 'checkbox', role: 'switch', 'aria-label': label });
   input.checked = checked;
@@ -154,6 +170,7 @@ export function toggle(checked: boolean, onChange: (v: boolean) => void, label: 
   return h('label', { class: 'switch' }, input, h('span', { class: 'track' }, h('span', { class: 'thumb' })));
 }
 
+/** Labelled `<select>` with `options`, preselected to `value`, reporting changes to `onChange`. */
 function select(options: { value: string; label: string }[], value: string, onChange: (v: string) => void, label: string): HTMLSelectElement {
   const s = h('select', { class: 'select', 'aria-label': label });
   for (const o of options) s.append(h('option', { value: o.value }, o.label));
@@ -199,7 +216,9 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
   const root = h('div', { class: 'sonar-settings' }, tabs, panels);
 
   let dragging: string | null = null;
+  /** Send a channel settings patch; failures are ignored (the next state update shows the real values). */
   const send = (patch: ChannelPatch) => { ctx.sendChannel(ch, patch).catch(() => {}); };
+  /** True when the plugin accepts commands and holds this channel's settings. */
   const controlsEnabled = () => !!ctx.state()?.canControl && !!ctx.state()?.channels[ch];
 
   // --- Sensitivity
@@ -250,6 +269,7 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
     const u = ctx.depthUnit();
     unitLabelA.textContent = unitLabelB.textContent = u.symbol;
     const presets = u.ranges.map((r, i) => ({ cm: presetCm(u, i), label: String(r) }));
+    /** `<option>`s for `list`, with the preset nearest `sel` cm selected. */
     const opt = (list: typeof presets, sel: number) => {
       if (!list.length) return [];
       const near = list.reduce((a, b) => (Math.abs(b.cm - sel) < Math.abs(a.cm - sel) ? b : a), list[0]);
@@ -264,6 +284,7 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
   const palIds = ch === 'sonar' ? SONAR_PALETTES : DOWNVISION_PALETTES;
   const palKey = ch === 'sonar' ? 'paletteSonar' : 'paletteDownvision';
   const swatch = h('span', { class: 'swatch' });
+  /** Show a gradient preview of palette `id` next to the palette selector. */
   const paintSwatch = (id: number) => {
     swatch.style.background = `linear-gradient(90deg, ${[0, 64, 128, 192, 255].map((v) => cssColour(id, v)).join(',')})`;
   };
@@ -299,6 +320,7 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
     tabs.append(b);
     return b;
   });
+  /** Show tab `i` and remember it as the preferred settings tab. */
   const select_ = (i: number) => {
     savePrefs({ settingsTab: i });
     tabEls.forEach((b, k) => {
@@ -313,6 +335,7 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
   const note = h('div', { class: 'settings-note' });
   root.append(note);
 
+  /** Sync the controls with plugin state (a slider being dragged keeps its value) and enable/disable them. */
   const refresh = (s: WifishState | null) => {
     const cs = s?.channels[ch] ?? null;
     const enabled = controlsEnabled();
@@ -376,6 +399,7 @@ export function overflowMenu(anchor: HTMLElement, items: { label: string; action
   return d;
 }
 
+/** Transducer offset magnitude for display: feet and inches, or one decimal in metres/fathoms. */
 function formatOffset(cm: number, u: DepthUnit): string {
   const a = Math.abs(cm);
   if (u.id === 'ft') {
@@ -390,6 +414,7 @@ export function mainSettings(ctx: Ctx): DialogHandle {
   const table = h('div', { class: 'main-settings' });
   const s = ctx.state();
   const depthValue = h('button', { class: 'link-btn' });
+  /** Update the transducer depth button text and its enabled state from current state. */
   const paintDepth = () => {
     const st = ctx.state();
     const off = st?.system?.transducerOffsetCm ?? 0;
@@ -405,6 +430,7 @@ export function mainSettings(ctx: Ctx): DialogHandle {
     prefs.depthUnit ?? '', (v) => { savePrefs({ depthUnit: (v || null) as typeof prefs.depthUnit }); ctx.applyPrefs(); paintDepth(); }, 'Depth units');
   const tempSel = select([{ value: 'F', label: '°F' }, { value: 'C', label: '°C' }], prefs.tempUnit, (v) => { savePrefs({ tempUnit: v as 'C' | 'F' }); ctx.applyPrefs(); }, 'Temperature units');
 
+  /** Append a labelled settings row to the table. */
   const row = (label: string, el: HTMLElement) => table.append(h('div', { class: 'row' }, h('span', { class: 'label' }, label), el));
   row('Transducer depth', depthValue);
   row('Depth units', unitSel);
@@ -458,6 +484,7 @@ export function transducerDepth(ctx: Ctx, onDone: () => void): DialogHandle {
   });
 }
 
+/** Help dialog explaining the echogram gestures and controls. */
 export function helpDialog(): DialogHandle {
   const items: [string, string][] = [
     ['Scrolling image', 'New sonar pings enter on the right and scroll to the left.'],
@@ -473,6 +500,7 @@ export function helpDialog(): DialogHandle {
   return openDialog(list, { title: 'Help', modal: true, className: 'help-dialog' });
 }
 
+/** About dialog: web app version, data source, sonar model, serial, software and status. */
 export function aboutDialog(s: WifishState | null, version: string): DialogHandle {
   const rows: [string, string][] = [
     ['Web app', version],

@@ -20,6 +20,7 @@ export interface Prefs {
 }
 
 const KEY = 'signalk-wifish.prefs';
+/** Fresh default prefs; °F for US-style locales, °C otherwise. */
 const defaults = (): Prefs => ({
   paletteSonar: DEFAULT_PALETTE.sonar,
   paletteDownvision: DEFAULT_PALETTE.downvision,
@@ -32,6 +33,7 @@ const defaults = (): Prefs => ({
   settingsTab: 0,
 });
 
+/** Stored prefs over the defaults; defaults alone when storage is missing, unreadable or blocked. */
 function load(): Prefs {
   try {
     const raw = localStorage.getItem(KEY);
@@ -42,6 +44,7 @@ function load(): Prefs {
 
 export const prefs: Prefs = load();
 
+/** Apply `patch` to the live prefs and persist them (best effort). */
 export function savePrefs(patch: Partial<Prefs>): void {
   Object.assign(prefs, patch);
   try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* not persisted */ }

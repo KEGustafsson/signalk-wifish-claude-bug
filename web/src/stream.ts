@@ -12,8 +12,10 @@ export interface StreamHandlers {
 
 export class PluginStream {
   #es: EventSource | null = null;
+  /** `h` receives the stream's events. */
   constructor(private h: StreamHandlers) {}
 
+  /** (Re)connect the SSE stream and route its events to the handlers. */
   open(): void {
     this.close();
     const es = new EventSource(`${API_BASE}/stream`);
@@ -26,12 +28,14 @@ export class PluginStream {
     es.addEventListener('live', () => this.h.live());
   }
 
+  /** Close the SSE stream, if open. */
   close(): void {
     this.#es?.close();
     this.#es = null;
   }
 }
 
+/** POST JSON to the plugin API; resolves to the new state or throws with the server's error message. */
 async function post(path: string, body: unknown): Promise<WifishState> {
   const r = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
@@ -44,5 +48,7 @@ async function post(path: string, body: unknown): Promise<WifishState> {
   return j as WifishState;
 }
 
+/** Change settings of one channel; resolves to the resulting plugin state. */
 export const setChannel = (ch: ChannelName, patch: ChannelPatch) => post(`/channel/${ch}`, patch);
+/** Change sonar system settings; resolves to the resulting plugin state. */
 export const setSystem = (patch: SystemPatch) => post('/system', patch);

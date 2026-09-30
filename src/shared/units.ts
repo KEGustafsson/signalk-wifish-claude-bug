@@ -33,9 +33,11 @@ export const DEPTH_UNITS: readonly DepthUnit[] = Object.freeze([
   },
 ]);
 
+/** Depth unit with this id ('ft', 'm', 'fa'); metres if unknown. */
 export function unitById(id: string): DepthUnit {
   return DEPTH_UNITS.find((u) => u.id === id) ?? DEPTH_UNITS[1];
 }
+/** Depth unit for a system settings unit code; metres if unknown. */
 export function unitByCode(code: number): DepthUnit {
   return DEPTH_UNITS.find((u) => u.code === code) ?? DEPTH_UNITS[1];
 }

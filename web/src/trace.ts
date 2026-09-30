@@ -54,6 +54,7 @@ export class TraceView {
   #shown: { W: number; H: number; mainW: number; zbW: number; colW: number; right: number; top: number; bottom: number; palette: number } | null = null;
   #colBuf = new Uint32Array(0);
 
+  /** Build the trace element (echo and overlay canvases, settings gear) and track its size and pixel ratio. */
   constructor(channel: ChannelName, store: ColumnStore, label: string) {
     this.channel = channel;
     this.store = store;
@@ -79,13 +80,19 @@ export class TraceView {
     mq?.addEventListener?.('change', () => { this.#resize(); this.#watchDpr(); }, { once: true });
   }
 
+  /** True when the trace is laid out with a non-zero width. */
   get visible(): boolean { return this.el.offsetParent !== null && this.#cssW > 0; }
+  /** True when following new pings (not paused or scrolled back). */
   get live(): boolean { return this.endN === null; }
+  /** Column number at the right edge: the paused position or the newest column. */
   get right(): number { return this.endN ?? this.store.last; }
+  /** True while a zoom window is set. */
   get zoomed(): boolean { return this.zoom !== null; }
 
+  /** Mark the trace for redraw on the next frame. */
   invalidate(): void { this.#dirty = true; }
 
+  /** Size the canvases to the element (echogram at up to 1.5x DPR, overlay at full DPR) and force a redraw. */
   #resize(): void {
     const r = this.el.getBoundingClientRect();
     this.#cssW = Math.round(r.width);
@@ -124,6 +131,7 @@ export class TraceView {
     return this.store.get(this.right) ?? this.store.cols[this.store.cols.length - 1];
   }
 
+  /** Unzoomed window: the reference ping's range snapped to the unit's presets (0..10 m without data). */
   fullWindow(): Window {
     const c = this.refColumn();
     if (!c) return { top: 0, bottom: 1000 };
@@ -133,6 +141,7 @@ export class TraceView {
     return bottom > top ? { top, bottom } : { top: c.startCm, bottom: c.endCm };
   }
 
+  /** Window shown in the main area: the zoom, or else the full range. */
   window(): Window {
     return this.zoom ?? this.fullWindow();
   }
@@ -151,6 +160,7 @@ export class TraceView {
 
   // ---------------------------------------------------------------- view changes
 
+  /** Scroll history by `cols` columns (positive = newer); reaching the newest column resumes live. */
   scrollBy(cols: number): void {
     if (!this.store.cols.length) return; // nothing to scroll through yet
     const first = this.store.first, last = this.store.last;
@@ -161,6 +171,7 @@ export class TraceView {
     this.#dirty = true;
   }
 
+  /** Put column `n` at the right edge; null or the newest column resumes live. */
   scrollTo(n: number | null): void {
     this.endN = n === null || n >= this.store.last ? null : Math.max(this.store.first, Math.round(n));
     this.#dirty = true;
@@ -172,11 +183,13 @@ export class TraceView {
     this.#dirty = true;
   }
 
+  /** Set screen px per column, clamped to 1..5. */
   setSpeed(s: number): void {
     this.speed = Math.max(1, Math.min(5, s));
     this.#dirty = true;
   }
 
+  /** Fit a zoom window in the full range within the zoom limits; null when it is (nearly) the full range. */
   #clamp(w: Window): Window | null {
     const full = this.fullWindow();
     const fullH = full.bottom - full.top;
@@ -207,6 +220,7 @@ export class TraceView {
     this.#afterManualMove();
   }
 
+  /** Pan the zoom window with a vertical drag of `dyCss` px; stops following the bottom. */
   panBy(dyCss: number): void {
     if (!this.zoom) return;
     const w = this.zoom;
@@ -222,6 +236,7 @@ export class TraceView {
     this.#afterManualMove();
   }
 
+  /** Back to the full range, following the bottom again. */
   resetZoom(): void {
     this.zoom = null;
     this.#anim = null;
@@ -229,6 +244,7 @@ export class TraceView {
     this.#dirty = true;
   }
 
+  /** Follow the bottom only if it is inside the window now, and remember where it is drawn. */
   #afterManualMove(): void {
     const b = this.refColumn()?.bottomCm ?? null;
     const w = this.window();
@@ -284,6 +300,7 @@ export class TraceView {
     return true;
   }
 
+  /** Render echogram, zoom box and A-scope; plain live scrolling only shifts the image and adds new pings. */
   #drawEcho(): void {
     const W = this.#img.width, H = this.#img.height;
     if (!this.#image || this.#image.width !== W || this.#image.height !== H) {
@@ -344,6 +361,7 @@ export class TraceView {
     }
   }
 
+  /** Draw the right-most shown ping in [x0, x1) as centred bars, width proportional to echo strength. */
   #aScope(pix: Uint32Array, W: number, H: number, x0: number, x1: number, win: Window, pal: Uint32Array): void {
     const c = this.store.get(this.right);
     const bg = pal[0];
@@ -368,6 +386,7 @@ export class TraceView {
     return 2;
   }
 
+  /** Draw the depth rulers and, when zoomed, the zoom box's window marker and its own ruler. */
   #drawOverlay(): void {
     const ctx = this.#ov.getContext('2d')!;
     const d = this.#dpr;
@@ -429,6 +448,7 @@ export class TraceView {
       step = [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? 10 * p;
     }
     const dec = TraceView.#decimals(step);
+    /** Canvas y of a displayed depth (in units). */
     const y = (vU: number) => ((vU - topU) / spanU) * H;
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.9)';
@@ -461,6 +481,7 @@ export class TraceView {
       }
     }
     // Window top / bottom in the big font, with a decimal unless they are whole.
+    /** Format a depth with one decimal, or none if it is (nearly) whole. */
     const edge = (v: number) => v.toFixed(Math.abs(v - Math.round(v)) < 0.05 ? 0 : 1);
     ctx.font = '700 16px system-ui, sans-serif';
     ctx.fillRect(xr - big, 0, big, 2);
@@ -478,5 +499,6 @@ export class TraceView {
     target.drawImage(this.#ov, x, y, this.#cssW, this.#cssH);
   }
 
+  /** Element size in CSS px as last measured. */
   get cssSize(): { w: number; h: number } { return { w: this.#cssW, h: this.#cssH }; }
 }

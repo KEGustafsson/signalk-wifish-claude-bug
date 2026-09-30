@@ -15,12 +15,14 @@ export class ReplayTransport extends EventEmitter<TransportEvents> implements Tr
   #running = false;
   #speed: number;
 
+  /** Replay `file`; `speed` > 1 plays faster than recorded (non-positive values mean 1). */
   constructor(file: string, { speed = 1 } = {}) {
     super();
     this.#file = file;
     this.#speed = speed > 0 ? speed : 1;
   }
 
+  /** Load the whole capture (up to any truncated record) and start looping it; reports failure as link 'offline'. */
   start(): void {
     if (this.#running) return;
     try {
@@ -43,6 +45,7 @@ export class ReplayTransport extends EventEmitter<TransportEvents> implements Tr
     this.#next();
   }
 
+  /** Stop playback and report the link as offline. */
   stop(): void {
     this.#running = false;
     if (this.#timer) clearTimeout(this.#timer);
@@ -50,8 +53,10 @@ export class ReplayTransport extends EventEmitter<TransportEvents> implements Tr
     this.emit('link', 'offline', 'stopped');
   }
 
+  /** No-op: `canSend` is false for a replay. */
   send(): void { /* a capture can't take commands */ }
 
+  /** Emit the current record and schedule the next after its recorded gap (scaled by speed, 1 s at loop end). */
   #next(): void {
     if (!this.#running) return;
     const r = this.#records[this.#i];

@@ -25,9 +25,13 @@ const QUIET_MS = 3000;
 /** After this long without data, drop the session and wait for a fresh announcement. */
 const GIVE_UP_MS = 20_000;
 
+/** Monotonic clock, ms. */
 const mono = () => globalThis.performance.now();
+/** Dotted IPv4 address as an unsigned 32-bit integer. */
 const toInt = (ip: string) => ip.split('.').reduce((n, o) => (n << 8) | Number(o), 0) >>> 0;
+/** Whether two IPv4 addresses are on the same subnet under `mask`. */
 const sameSubnet = (a: string, b: string, mask: string) => ((toInt(a) & toInt(mask)) >>> 0) === ((toInt(b) & toInt(mask)) >>> 0);
+/** Whether two announcements name the same data group/port, device and control port. */
 const sameService = (a: Announce, b: Announce) => a.group === b.group && a.port === b.port && a.device === b.device && a.ctrlPort === b.ctrlPort;
 
 interface Candidate { address: string; netmask: string | null }
@@ -54,6 +58,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
   #lastRx = 0;
   #sessionAt = 0;
 
+  /** Passive (never sends) when `opts.keepalive` is false; nothing is opened until start(). */
   constructor(opts: DeviceOptions = {}) {
     super();
     this.#opts = opts;
@@ -61,9 +66,12 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.#log = opts.log ?? (() => {});
   }
 
+  /** Current link state; 'offline' before any has been reported. */
   get link(): LinkState { return this.#link ?? 'offline'; }
+  /** The sonar announcement the current session uses, or null. */
   get service(): Announce | null { return this.#service; }
 
+  /** Record and emit a link change; a repeat of the same state and message is suppressed. */
   #setLink(s: LinkState, msg: string): void {
     if (s === this.#link && msg === this.#message) return;
     this.#message = msg;
@@ -71,12 +79,14 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.emit('link', s, msg);
   }
 
+  /** Open discovery and start looking for the sonar; no-op when already running. */
   start(): void {
     if (this.#running) return;
     this.#running = true;
     this.#open();
   }
 
+  /** Cancel any pending retry, close all sockets and report 'offline'. */
   stop(): void {
     this.#running = false;
     if (this.#retry) clearTimeout(this.#retry);
@@ -85,6 +95,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.#setLink('offline', 'stopped');
   }
 
+  /** Send a datagram to the sonar's control port; dropped when passive or sessionless, errors only logged. */
   send(b: Uint8Array): void {
     if (!this.canSend || !this.#ctrl || !this.#service) return;
     try {
@@ -94,6 +105,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     }
   }
 
+  /** Local interfaces to listen on: the configured one, else the non-internal IPv4s (only the 192.x ones when there are any). */
   #candidatesNow(): Candidate[] {
     if (this.#opts.iface) return [{ address: this.#opts.iface, netmask: null }];
     const all = Object.values(os.networkInterfaces()).flat()
@@ -102,6 +114,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     return (c192.length ? c192 : all).map((a) => ({ address: a.address, netmask: a.netmask }));
   }
 
+  /** Close everything, report 'offline' with `why`, and reopen after RETRY_MS while running. */
   #scheduleRetry(why: string): void {
     this.#close();
     this.#setLink('offline', why);
@@ -109,6 +122,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.#retry = setTimeout(() => { this.#retry = null; if (this.#running) this.#open(); }, RETRY_MS);
   }
 
+  /** Bind the discovery socket, join its group on each candidate interface, then start the interface rescan. */
   #open(): void {
     this.#candidates = this.#candidatesNow();
     if (!this.#candidates.length) return this.#scheduleRetry('No IPv4 network interface; join the sonar Wi-Fi');
@@ -133,8 +147,10 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     });
   }
 
+  /** While no session runs, reopen discovery if the set of local interface addresses changed. */
   #rescanInterfaces(): void {
     if (!this.#running || this.#timer) return; // a session is active
+    /** Order-independent key of the candidates' addresses. */
     const key = (cs: Candidate[]) => cs.map((c) => c.address).sort().join(',');
     if (key(this.#candidatesNow()) === key(this.#candidates)) return;
     this.#log('network interfaces changed, reopening discovery');
@@ -142,6 +158,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.#open();
   }
 
+  /** Stop the rescan and any session, and close the discovery socket. */
   #close(): void {
     if (this.#rescan) clearInterval(this.#rescan);
     this.#rescan = null;
@@ -150,6 +167,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.#disc = null;
   }
 
+  /** Handle a discovery-socket datagram: a sonar announcement, the unit message, or sonar data sent there. */
   #onDiscovery(b: Buffer, sender: string): void {
     const id = messageId(b);
     if (id === MsgId.ANNOUNCE) {
@@ -174,6 +192,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     }
   }
 
+  /** Pass a datagram on; sonar data (not the unit message) also marks the link alive and restores 'connected'. */
   #rx(b: Uint8Array): void {
     if (messageId(b) !== MsgId.UNIT) {
       this.#lastRx = mono();
@@ -182,11 +201,13 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.emit('datagram', b);
   }
 
+  /** Local interface to reach `device`: the only candidate, or the one on its subnet. */
   #ifaceFor(device: string): string | undefined {
     if (this.#candidates.length === 1) return this.#candidates[0].address;
     return this.#candidates.find((c) => c.netmask && sameSubnet(c.address, device, c.netmask))?.address;
   }
 
+  /** Once the announcement and unit message are both in, open the data and control sockets and start ticking. */
   #maybeStart(): void {
     const s = this.#service;
     if (!s || !this.#hasUnit || this.#timer) return;
@@ -221,6 +242,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.#tick();
   }
 
+  /** Each second: rediscover after GIVE_UP_MS of silence, report 'lost' after QUIET_MS, and send a keepalive. */
   #tick(): void {
     const quiet = mono() - this.#lastRx;
     if (quiet > GIVE_UP_MS && mono() - this.#sessionAt > GIVE_UP_MS) {
@@ -235,6 +257,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     if (this.canSend) this.send(buildKeepalive({ connected: this.#opts.isReady?.() ?? false }));
   }
 
+  /** Close the data and control sockets, leave the data group on the discovery socket, forget the service. */
   #stopSession(): void {
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = null;

@@ -35,8 +35,10 @@ function clampColumns(v: unknown): number {
   const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
   return Number.isFinite(n) ? Math.max(0, Math.min(20_000, Math.round(n))) : 1500;
 }
+/** Monotonic clock, ms. */
 const mono = () => globalThis.performance.now();
 
+/** Channel settings as shown to the web app, or null when not received yet. */
 function view(s: ChannelSettings | null): ChannelSettingsView | null {
   if (!s) return null;
   const { index: configIndex, name, rangeAuto, rangeShallowCm, rangeDeepCm, gainAuto, gain, contrastAuto, contrast, noiseFilterAuto, noiseFilter } = s;
@@ -68,6 +70,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   #shownDepthCm: number | null = null;
   #holdTimer: NodeJS.Timeout | null = null;
 
+  /** Wire transport datagrams and link changes into the session, and session events into deltas and state. */
   constructor(transport: Transport, opts: EngineOptions = {}) {
     super();
     this.setMaxListeners(0);
@@ -114,6 +117,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     s.on('column', (c) => this.#column(c));
   }
 
+  /** Start the stale-data watchdog and the transport; an Engine cannot be restarted after stop(). */
   start(): void {
     if (this.#running || this.#stopped) return; // listeners are gone after stop(); make a new Engine
 
@@ -122,6 +126,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.transport.start();
   }
 
+  /** Stop timers and the transport and remove every listener; the Engine is single-use. */
   stop(): void {
     if (!this.#running) return;
     this.#running = false;
@@ -137,13 +142,17 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.removeAllListeners();
   }
 
+  /** Link state last reported by the transport. */
   get link(): LinkState { return this.#link; }
+  /** Human-readable status that came with the last link change. */
   get message(): string { return this.#message; }
 
+  /** Backlog of recent columns for a channel, oldest first. */
   history(ch: ChannelName): readonly ColumnMessage[] {
     return this.#history[ch];
   }
 
+  /** Snapshot of link, unit, readings and channel/system settings for the web app. */
   state(): WifishState {
     const s = this.session;
     const u = s.unit;
@@ -191,6 +200,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     return null;
   }
 
+  /** Apply a system settings change from the UI. Returns an error message, or null when sent. */
   setSystem(patch: SystemPatch): string | null {
     if (!this.transport.canSend) return 'Sonar settings cannot be changed in this mode';
     const m = this.session.buildSystemCommand(patch);
@@ -201,6 +211,7 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   // ------------------------------------------------------------------ internals
 
+  /** Emit 'state' immediately when `now`, else coalesce changes into one emit within 250 ms. */
   #stateChanged(now = false): void {
     if (now) {
       if (this.#stateTimer) clearTimeout(this.#stateTimer);
@@ -215,10 +226,12 @@ export class Engine extends EventEmitter<EngineEvents> {
     }, 250);
   }
 
+  /** Send the values as one Signal K delta, if there are any. */
   #emitSk(values: PathValue[]): void {
     if (values.length) this.#opts.onDelta?.(toDelta(values));
   }
 
+  /** Publish depth paths for `cm` (throttled unless `force`), sending null for paths that no longer apply. */
   #depth(cm: number | null, force = false): void {
     if (!this.#opts.emitDepth) return;
     if (cm === null && this.#depthPaths.size === 0) return; // nothing published yet, nothing to clear
@@ -236,6 +249,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.#emitSk([...gone, ...values.filter((v) => this.#throttles.depth.shouldEmit(v.path, v.value, now))]);
   }
 
+  /** Publish water temperature in kelvin (throttled); null clears it only once a value was published. */
   #temperature(c: number | null): void {
     if (!this.#opts.emitTemperature) return;
     if (c === null && !this.#tempPublished) return; // nothing to clear yet
@@ -244,6 +258,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     if (this.#throttles.temp.shouldEmit(PATH.waterTemp, value, mono())) this.#emitSk([{ path: PATH.waterTemp, value }]);
   }
 
+  /** Watchdog: clear readings once no sonar data has arrived for 5 s. */
   #checkStale(): void {
     const quiet = this.#lastData !== null && mono() - this.#lastData > 5000;
     if (quiet && !this.#stale) {
@@ -281,6 +296,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     }, DEPTH_HOLD_MS);
   }
 
+  /** Turn a session column into a ColumnMessage, append it to the channel's capped history and emit it. */
   #column(c: SessionColumn): void {
     const ch = NAMES[c.channel];
     const offset = this.session.system?.transducerOffsetCm ?? 0;

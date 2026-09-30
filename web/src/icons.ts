@@ -1,5 +1,6 @@
 // Toolbar and tile icons (own drawings, in the style of the app's round white-outline buttons).
 
+/** Wrap SVG `body` in a stroked, currentColor icon element hidden from assistive tech. */
 const svg = (body: string, vb = '0 0 24 24') =>
   `<svg viewBox="${vb}" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 

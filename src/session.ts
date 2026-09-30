@@ -51,9 +51,11 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
   columns = 0;
   #warned = new Set<string>();
 
+  /** Latest system settings from the device (or our own last command), or null before any arrived. */
   get system(): SystemSettings | null {
     return this.#system?.parsed ?? null;
   }
+  /** Held settings for ping configuration `index`, or null if not received (or `index` is null). */
   channelSettings(index: number | null): ChannelSettings | null {
     return index === null ? null : this.#channels.get(index)?.parsed ?? null;
   }
@@ -78,6 +80,7 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
     this.asm = new PingAssembler();
   }
 
+  /** Emit `warn` with `msg` only the first time `key` is seen, so a bad stream doesn't flood the log. */
   #warnOnce(key: string, msg: string): void {
     if (this.#warned.has(key)) return;
     this.#warned.add(key);
@@ -164,6 +167,7 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
     return ok ? h.id : null;
   }
 
+  /** Emit a completed column for an enabled configuration, with its view window from the channel's range settings. */
   #column(r: ReturnType<typeof parsePingResults>, configIndex: number, seq: number, samples: Uint8Array): void {
     if (!r || (r.channel !== 0 && r.channel !== 1)) return; // can't tell which trace it belongs to
     const channel = r.channel as ChannelId;

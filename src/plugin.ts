@@ -82,6 +82,7 @@ export const schema = {
   },
 } as const;
 
+/** Transport for the configured source; the real device is the default. */
 export function createTransport(cfg: PluginConfig, isReady: () => boolean, log: (m: string) => void): Transport {
   switch (cfg.source) {
     case 'demo':
@@ -93,11 +94,14 @@ export function createTransport(cfg: PluginConfig, isReady: () => boolean, log: 
   }
 }
 
+/** Build the Signal K plugin: runs an Engine for the configured source and serves the web app's API. */
 export function plugin(app: ServerApp) {
   let engine: Engine | null = null;
   const api = new Api(() => engine);
+  /** Log through the server's debug logger, if it has one. */
   const debug = (m: string) => app.debug?.(m);
 
+  /** Show link changes as plugin status; 'offline' (other than after stop) as a plugin error. */
   const status = (link: string, msg: string) => {
     if (link === 'offline' && msg !== 'stopped') app.setPluginError?.(msg);
     else app.setPluginStatus?.(msg);
@@ -109,6 +113,7 @@ export function plugin(app: ServerApp) {
     description: 'Raymarine Wi-Fish and Dragonfly Pro Wi-Fi sonar: depth, water temperature and live echogram',
     schema: () => schema,
 
+    /** (Re)start with a new transport and engine; failures are reported as a plugin error, never thrown. */
     start(config: PluginConfig = {}) {
       engine?.stop(); // a second start without stop must not leak the first engine's sockets
       engine = null;
@@ -134,6 +139,7 @@ export function plugin(app: ServerApp) {
       }
     },
 
+    /** Detach viewers from the engine, then stop it. */
     stop() {
       const e = engine;
       engine = null;
@@ -141,6 +147,7 @@ export function plugin(app: ServerApp) {
       e?.stop();
     },
 
+    /** Mount the API on the plugin's router; requests it does not handle fall through to `next`. */
     registerWithRouter(router: Router) {
       router.use((req, res, next) => {
         const path = req.path ?? new URL(req.url ?? '/', 'http://x').pathname;

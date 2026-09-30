@@ -52,8 +52,11 @@ export function isWellFormed(b: Uint8Array, h: Header): boolean {
   return h.length >= min && h.length <= b.length;
 }
 
+/** DataView over exactly `b`'s bytes (honours a subarray's offset). */
 const dv = (b: Uint8Array) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+/** Dotted-quad IPv4 address from the 4 bytes at offset `o`. */
 const ip4 = (b: Uint8Array, o: number) => `${b[o]}.${b[o + 1]}.${b[o + 2]}.${b[o + 3]}`;
+/** Latin-1 string from a NUL-padded fixed-width field `[from, to)`, cut at the first NUL and trimmed. */
 const cstr = (b: Uint8Array, from: number, to: number) =>
   new TextDecoder('latin1').decode(b.subarray(from, Math.min(to, b.length))).replace(/\0.*$/s, '').trim();
 
@@ -84,6 +87,7 @@ export function parseAnnounce(b: Uint8Array): Announce | null {
   };
 }
 
+/** True for an integer UDP port in 1..65535. */
 const validPort = (p: number) => Number.isInteger(p) && p > 0 && p < 65536;
 
 /**
@@ -236,6 +240,7 @@ export function parseChannelSettings(b: Uint8Array): ChannelSettings | null {
   };
 }
 
+/** Round and clamp to a 0..100 percentage. */
 const pct = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
 /** Copy of a received 0x270102 with `patch` applied and seq set. Percentages are clamped to 0..100 (the app ignores values outside it). */
@@ -337,6 +342,7 @@ export class PingAssembler {
   dropped = 0;
   readonly staleMs: number;
 
+  /** `staleMs`: how long partial columns, held results and waiting columns stay pairable. */
   constructor({ staleMs = 1000 } = {}) {
     this.staleMs = staleMs;
   }
@@ -392,6 +398,7 @@ export class PingAssembler {
     return null;
   }
 
+  /** Discard the partial column for `seq` (counting it in `dropped` if one existed); always returns null. */
   #drop(seq: number): null {
     if (this.#pings.delete(seq)) this.dropped++;
     return null;
