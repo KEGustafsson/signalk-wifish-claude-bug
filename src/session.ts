@@ -77,6 +77,7 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
     this.bottomCm = null;
     this.waterTempCentiC = null;
     this.errorFlags = null;
+    this.systemStatus = null;
     this.asm = new PingAssembler();
   }
 

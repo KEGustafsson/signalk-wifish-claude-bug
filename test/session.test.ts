@@ -61,9 +61,12 @@ describe('Sonar4Session', () => {
     s.handle(unit);
     s.handle(msg(MsgId.ENV, 68, (b) => b.writeInt16LE(1530, 28)));
     s.handle(results(1, 1, 0, 5000));
+    s.handle(msg(MsgId.SYS_STATUS, 1063));
+    expect(s.systemStatus).not.toBeNull();
     s.reset();
     expect(s.unit).toBeNull();
     expect(s.waterTempCentiC).toBeNull();
+    expect(s.systemStatus).toBeNull(); // no stale software version for the next unit
     s.handle(channelSettings(0, 1));
     s.handle(segment({ seq: 1, seg: 0, count: 1, total: 1, offset: 0, data: [1], setting: 0 }));
     expect(cols).toHaveLength(0); // the old results must not be reused

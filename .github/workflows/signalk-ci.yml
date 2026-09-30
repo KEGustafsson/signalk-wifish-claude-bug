@@ -12,6 +12,9 @@
 # On push/PR it runs with sensible defaults.
 # You can also trigger it manually from the GitHub Actions UI
 # with custom settings (Node versions, integration tests).
+#
+# The shared workflow is pinned to a reviewed signalk-server commit
+# (Dependabot proposes updates, see .github/dependabot.yml).
 # ─────────────────────────────────────────────────────────────
 
 name: SignalK Plugin CI
@@ -61,11 +64,15 @@ on:
         default: '["latest"]'
         type: string
 
+# The shared workflow only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   # ── Automatic runs (push / pull request) ──────────────────
   test-plugin-auto:
     if: ${{ github.event_name != 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@f5e91aa74817ca14bbff6b4ae47f8c83f3fe0b36 # master, 2026-09-30
     with:
       test-command: npm test
       build-command: npm run build --if-present
@@ -76,7 +83,7 @@ jobs:
   # ── Manual runs (workflow_dispatch with custom inputs) ────
   test-plugin-manual:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@f5e91aa74817ca14bbff6b4ae47f8c83f3fe0b36 # master, 2026-09-30
     with:
       test-command: ${{ inputs.test-command }}
       build-command: ${{ inputs.build-command }}
