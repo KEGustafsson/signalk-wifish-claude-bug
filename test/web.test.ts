@@ -8,7 +8,7 @@ const col = (n: number, bytes: number[]): ColumnMessage => ({
   data: Buffer.from(bytes).toString('base64'),
 });
 
-test('ColumnStore decodes, bounds, dedupes and resets on renumbering', () => {
+test('ColumnStore decodes, bounds and skips columns it already holds', () => {
   const s = new ColumnStore('sonar', 3);
   for (let n = 1; n <= 5; n++) s.add(col(n, [n, 2]));
   expect(s.cols.map((c) => c.n)).toEqual([3, 4, 5]);
@@ -16,7 +16,13 @@ test('ColumnStore decodes, bounds, dedupes and resets on renumbering', () => {
   expect(s.get(1)).toBeUndefined();
   s.add(col(5, [9])); // duplicate from a backlog
   expect(s.last).toBe(5);
-  s.add(col(1, [7])); // plugin restarted
+  s.add(col(4, [7])); // older column from a backlog replayed after a reconnect
+  expect(s.cols.map((c) => c.n)).toEqual([3, 4, 5]);
+  expect([...s.get(4)!.samples]).toEqual([4, 2]);
+  s.add(col(6, [6])); // newer column
+  expect(s.cols.map((c) => c.n)).toEqual([4, 5, 6]);
+  s.clear(); // restart (reset event or new epoch)
+  s.add(col(1, [1]));
   expect(s.cols.map((c) => c.n)).toEqual([1]);
 });
 

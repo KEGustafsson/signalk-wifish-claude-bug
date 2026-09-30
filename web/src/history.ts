@@ -30,13 +30,13 @@ export class ColumnStore {
   /** Number of the newest held column, or 0 when empty. */
   get last(): number { return this.cols.length ? this.cols[this.cols.length - 1].n : 0; }
 
-  /** Append a column (skipping duplicates, restarting on renumbering) and trim to `max` columns. */
+  /**
+   * Append a column newer than the last held one and trim to `max` columns. Older numbers come from
+   * a backlog replayed after a reconnect and are already held; a restart is handled by clear().
+   */
   add(m: ColumnMessage): void {
     const last = this.cols[this.cols.length - 1];
-    if (last && m.n <= last.n) {
-      if (m.n < last.n - 1) this.cols.length = 0; // plugin restarted: numbering began again
-      else return; // duplicate from a backlog replay
-    }
+    if (last && m.n <= last.n) return;
     this.cols.push({
       n: m.n, t: m.t, startCm: m.startCm, endCm: m.endCm, bottomCm: m.bottomCm, tempCentiC: m.waterTempCentiC,
       samples: decode(m.data),
