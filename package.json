@@ -1,0 +1,14 @@
+{
+  "name": "signalk-wifish",
+  "version": "0.1.0",
+  "description": "Open interface to Raymarine Wi-Fish / Dragonfly Pro Wi-Fi sonar for Signal K",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "probe": "node tools/wifish-probe.mjs",
+    "dump": "node tools/dump-raw.mjs"
+  },
+  "keywords": ["signalk", "sonar", "raymarine", "wi-fish", "dragonfly", "depth"],
+  "license": "MIT"
+}
