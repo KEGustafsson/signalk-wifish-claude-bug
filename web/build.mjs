@@ -14,14 +14,14 @@ const js = {
   entryPoints: [path.join(root, 'web/src/main.ts')],
   outfile: path.join(root, 'public/app.js'),
   format: 'iife',
-  target: ['es2020', 'chrome90', 'safari14', 'firefox90'],
+  target: ['es2020'],
   define: { __VERSION__: JSON.stringify(pkg.version) },
 };
 const css = {
   ...common,
   entryPoints: [path.join(root, 'web/style.css')],
   outfile: path.join(root, 'public/app.css'),
-  target: ['chrome90', 'safari14', 'firefox90'],
+  target: ['chrome90', 'firefox90', 'safari15'],
 };
 
 if (watch) {
