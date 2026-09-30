@@ -16,19 +16,25 @@ nmcli con mod wifish \
 nmcli con up wifish
 ```
 
-- `never-default`: default route stays on eth0.
-- `powersave 2`: Wi-Fi power save drops multicast frames.
-- `autoconnect-retries 0`: reconnect whenever the sonar powers up.
+- `never-default`: default route stays on Ethernet.
+- `ipv6.method disabled` needs NetworkManager ≥ 1.20; on older versions
+  (JetPack 4.x) use `ipv6.method ignore`.
+- `powersave 2` (= disable): Wi-Fi power save can drop or delay multicast frames.
+- `autoconnect-retries 0` (= retry forever): NM never gives up, so it
+  reconnects whenever the sonar powers up.
 
-Verify:
+Verify (interface names vary; Jetsons often use names like `wlP1p1s0`):
 
 ```sh
-ip route                     # exactly one default route, via eth0
+ip route                     # exactly one default route, via Ethernet
 ip -4 addr show wlan0        # note the WLAN address
-ip maddr show dev wlan0      # while the probe runs: 224.0.0.1 + data group
+ip maddr show dev wlan0      # while the probe runs: the announced data group
+                             # (224.0.0.1 is always listed, so it proves nothing)
 ```
 
-Make sure the LAN subnet does not overlap the Wi-Fish subnet.
+Make sure the LAN subnet does not overlap the Wi-Fish subnet. If both the LAN
+and the Wi-Fish use `192.x` addresses, the probe picks the one on the same
+subnet as the announced device; pass `--iface <WLAN address>` to force it.
 
 ## Docker
 

@@ -1,168 +1,275 @@
 #!/usr/bin/env node
 // Wi-Fish "Sonar4" probe — discovery, keepalive, depth/temp decode, raw logging.
-// Usage: node wifish-probe.mjs [--iface 192.168.x.y] [--log raw.bin] [--sk host:port] [--no-keepalive]
-// Spec: docs/PROTOCOL.md. No dependencies.
+// Spec: docs/PROTOCOL.md. Decoding lives in lib/sonar4.mjs. No dependencies.
 
 import dgram from 'node:dgram';
 import os from 'node:os';
 import fs from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
+import { parseArgs } from 'node:util';
+import {
+  VERSION, DISCOVERY, SERVICE_SONAR, MsgId, REQUIRED,
+  messageId, parseHeader, isWellFormed, parseAnnounce, checkService, parseUnit,
+  parseBottom, parseEnv, parseError, parsePingResults, parsePingData, buildKeepalive, PingAssembler,
+} from '../lib/sonar4.mjs';
+import { PATH, cmToM, centiCToK, toDelta, Throttle } from '../lib/signalk.mjs';
+import { CHANNEL, encodeRecord, readRawLog } from '../lib/rawlog.mjs';
 
-const args = process.argv.slice(2);
-const arg = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
-const NO_KEEPALIVE = args.includes('--no-keepalive');
+const USAGE = `Usage: wifish-probe [options]
+  --iface <ipv4>     local WLAN address (default: the 192.x address on the sonar's subnet)
+  --log <file>       append raw capture (read with dump-raw.mjs)
+  --sk <host:port>   send Signal K deltas over UDP
+  --no-keepalive     passive: never send anything to the device
+  --replay <file>    decode a raw capture instead of listening (no sockets)
+  -h, --help`;
 
-const DISCOVERY_GROUP = '224.0.0.1';
-const DISCOVERY_PORT = 5800;
-const VERSION = 116;
-
-const ID = {
-  ANNOUNCE: 0, UNIT: 1,
-  KEEPALIVE: 0x270100, PING_DATA: 0x270101, CHAN_SETTINGS: 0x270102,
-  SYS_STATUS: 0x270103, ENV: 0x270104, SYS_SETTINGS: 0x270106,
-  BOTTOM: 0x270108, PING_RESULTS: 0x27010b, ERROR: 0x27010d,
-};
-const NAMES = Object.fromEntries(Object.entries(ID).map(([k, v]) => [v, k]));
-const REQUIRED = [ID.ENV, ID.ERROR, ID.SYS_STATUS, ID.SYS_SETTINGS, ID.CHAN_SETTINGS];
-
-// Pick local IPv4 like the app does (first address starting with 192.)
-function pickIface() {
-  for (const list of Object.values(os.networkInterfaces()))
-    for (const a of list ?? [])
-      if (a.family === 'IPv4' && a.address.startsWith('192.')) return a.address;
-  return undefined;
-}
-const iface = arg('--iface') ?? pickIface();
-if (!iface) { console.error('No 192.x interface; pass --iface'); process.exit(1); }
-console.log(`[init] interface ${iface}`);
-
-// Raw log: [u64 ms][u8 channel 0=disc 1=data][u32 len][bytes]
-const logFd = arg('--log') ? fs.openSync(arg('--log'), 'a') : null;
-function logRaw(ch, buf) {
-  if (logFd === null) return;
-  const h = Buffer.alloc(13);
-  h.writeBigUInt64LE(BigInt(Date.now()), 0); h.writeUInt8(ch, 8); h.writeUInt32LE(buf.length, 9);
-  fs.writeSync(logFd, h); fs.writeSync(logFd, buf);
-}
-
-// Optional Signal K UDP delta output
-const skTarget = arg('--sk')?.split(':');
-const skSock = skTarget ? dgram.createSocket('udp4') : null;
-function emitSk(values) {
-  const delta = { updates: [{ $source: 'wifish', timestamp: new Date().toISOString(), values }] };
-  if (skSock) skSock.send(JSON.stringify(delta), Number(skTarget[1]), skTarget[0]);
-}
-
-const ip4 = (b, o) => `${b[o]}.${b[o + 1]}.${b[o + 2]}.${b[o + 3]}`;
-const seen = new Map();
-let service = null, unit = null, dataSock = null, ctrlSock = null, kaTimer = null;
-
-// ---------- discovery ----------
-const disc = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-disc.on('message', (b) => {
-  logRaw(0, b);
-  const id = b.readUInt32LE(0);
-  if (id === ID.ANNOUNCE && b.length >= 36) {
-    const svc = b.readUInt32LE(8);
-    if (svc === 39 && !service) {
-      service = { group: ip4(b, 20), port: b.readUInt32LE(24), device: ip4(b, 28), ctrlPort: b.readUInt32LE(32) };
-      console.log('[disc] sonar service', service);
-      maybeStart();
-    } else if (svc !== 39 && !seen.has(`svc${svc}`)) {
-      seen.set(`svc${svc}`, 1);
-      console.log(`[disc] service ${svc} port=${b.readUInt32LE(24)} ${b.toString('hex', 16, 36)}`);
-    }
-  } else if (id === ID.UNIT && b.length >= 52 && !unit) {
-    unit = { type: b.readUInt32LE(4), serial: b.readUInt32LE(8).toString(16), name: b.toString('latin1', 20, 52).replace(/\0.*$/, '') };
-    console.log('[disc] unit', unit);
-    maybeStart();
-  } else {
-    handleSonar(b, 'disc');
-  }
-});
-disc.bind(DISCOVERY_PORT, () => { disc.addMembership(DISCOVERY_GROUP, iface); console.log('[disc] listening 224.0.0.1:5800'); });
-
-// ---------- data + keepalive ----------
-function maybeStart() {
-  if (!service || !unit || dataSock) return;
-  dataSock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-  dataSock.on('message', (b) => { logRaw(1, b); handleSonar(b, 'data'); });
-  dataSock.bind(service.port, () => {
-    dataSock.addMembership(service.group, iface);
-    console.log(`[data] joined ${service.group}:${service.port}`);
+// ---------- options ----------
+let opts;
+try {
+  const { values } = parseArgs({
+    strict: true, allowPositionals: false,
+    options: {
+      iface: { type: 'string' }, log: { type: 'string' }, sk: { type: 'string' }, replay: { type: 'string' },
+      'no-keepalive': { type: 'boolean', default: false }, help: { type: 'boolean', short: 'h' },
+    },
   });
-  if (NO_KEEPALIVE) { console.log('[ka] keepalive disabled'); return; }
-  ctrlSock = dgram.createSocket('udp4');
-  ctrlSock.bind(0, iface, () => { kaTimer = setInterval(sendKeepalive, 1000); sendKeepalive(); });
+  if (values.help) { console.log(USAGE); process.exit(0); }
+  if (values.iface !== undefined && !net.isIPv4(values.iface)) throw new Error(`--iface: not an IPv4 address: ${values.iface}`);
+  let sk = null;
+  if (values.sk !== undefined) {
+    const m = /^([^:]+):(\d{1,5})$/.exec(values.sk);
+    const port = m ? Number(m[2]) : 0;
+    if (!m || port < 1 || port > 65535) throw new Error(`--sk: expected host:port, got ${values.sk}`);
+    sk = { host: m[1], port };
+  }
+  opts = { ...values, sk, keepalive: !values['no-keepalive'] };
+} catch (e) {
+  console.error(`${e.message}\n\n${USAGE}`);
+  process.exit(2);
+}
+// npm run executes from the package root; resolve paths against where the user ran it.
+const userPath = (p) => path.resolve(process.env.INIT_CWD ?? process.cwd(), p);
+
+// ---------- outputs ----------
+let logFd = opts.log ? fs.openSync(userPath(opts.log), 'a') : null;
+function logRaw(channel, buf) {
+  if (logFd === null) return;
+  try {
+    fs.writeSync(logFd, encodeRecord(channel, buf));
+  } catch (e) {
+    console.error(`[log] write failed, raw logging disabled: ${e.message}`);
+    logFd = null;
+  }
 }
 
-function sendKeepalive() {
-  const k = Buffer.alloc(37);
-  k.writeUInt32LE(ID.KEEPALIVE, 0); k.writeUInt32LE(37, 4); k.writeUInt32LE(VERSION, 8);
-  k.writeUInt32LE(0xdeadbeef, 12);
-  k.writeUInt8(REQUIRED.every((id) => seen.has(id)) ? 1 : 0, 16);
-  k.writeBigUInt64LE(BigInt(Math.floor(Date.now() / 1000)), 17);
-  k.writeBigInt64LE(-1n, 25);
-  k.writeInt32LE(-0x80000000, 33);
-  ctrlSock.send(k, service.ctrlPort, service.device);
+const skSock = opts.sk ? dgram.createSocket('udp4') : null;
+skSock?.on('error', (e) => console.warn(`[sk] ${e.message}`));
+// Depth: on change, max 5 Hz, 5 s heartbeat. Temperature: max 1 Hz, 10 s heartbeat. null (no data) passes at once.
+const throttles = { [PATH.depth]: new Throttle({ minIntervalMs: 200, heartbeatMs: 5000 }), [PATH.waterTemp]: new Throttle({ minIntervalMs: 1000, heartbeatMs: 10_000 }) };
+function emitSk(p, value) {
+  if (!skSock || !throttles[p].shouldEmit(p, value, Date.now())) return;
+  // One delta per datagram: the Signal K UDP input JSON.parses each datagram whole.
+  skSock.send(JSON.stringify(toDelta([{ path: p, value }])), opts.sk.port, opts.sk.host, (e) => e && console.warn(`[sk] ${e.message}`));
 }
 
 // ---------- sonar4 decode ----------
-const pings = new Map(); // seq -> { buf, next, total, type, setting }
-const results = new Map(); // seq -> { channel, r0, r1 }
-let depthCm = null, tempC = null;
+const seen = new Map(); // message id -> count (well-formed messages only)
+const warned = new Set();
+const warnOnce = (key, msg) => { if (!warned.has(key)) { warned.add(key); console.warn(msg); } };
+const nameOf = (id) => Object.keys(MsgId).find((k) => MsgId[k] === id) ?? `0x${id.toString(16)}`;
+const asm = new PingAssembler();
+let tempCentiC, lastRx = 0, columns = 0;
 
 function handleSonar(b, via) {
-  if (b.length < 16) return;
-  const id = b.readUInt32LE(0), len = b.readUInt32LE(4), ver = b.readUInt32LE(8);
-  if (!(id >> 8 === 0x2701)) return;
-  if (ver !== VERSION) { console.warn(`[warn] ${NAMES[id] ?? id.toString(16)} version ${ver}`); return; }
-  if (!seen.has(id)) console.log(`[${via}] first ${NAMES[id] ?? '0x' + id.toString(16)} len=${len}`);
-  seen.set(id, (seen.get(id) ?? 0) + 1);
+  const h = parseHeader(b);
+  if (!h) return;
+  if (h.version !== VERSION) return warnOnce(`ver${h.id}`, `[warn] ${nameOf(h.id)} version ${h.version} != ${VERSION}, ignored`);
+  if (!isWellFormed(b, h)) return warnOnce(`len${h.id}`, `[warn] ${nameOf(h.id)} malformed: ${b.length} bytes, header says ${h.length}; dropping these`);
+  lastRx = Date.now();
+  if (!seen.has(h.id)) console.log(`[${via}] first ${nameOf(h.id)} len=${h.length}`);
+  seen.set(h.id, (seen.get(h.id) ?? 0) + 1);
 
-  switch (id) {
-    case ID.BOTTOM: {
-      const d = b.readInt32LE(17);
-      depthCm = d === -0x80000000 ? null : d;
-      console.log(`[depth] ${depthCm === null ? '--' : (depthCm / 100).toFixed(2) + ' m'}  q=${b[16]} ch=${b[21]}`);
-      if (depthCm !== null) emitSk([{ path: 'environment.depth.belowTransducer', value: depthCm / 100 }]);
+  switch (h.id) {
+    case MsgId.BOTTOM: {
+      const m = parseBottom(b);
+      console.log(`[depth] ${m.depthCm === null ? '--' : (m.depthCm / 100).toFixed(2) + ' m'}  q=${m.quality} ch=${m.channel}`);
+      // ❓ Assumed below-transducer; unconfirmed (PROTOCOL.md §5). null = bottom lock lost, clears stale depth.
+      emitSk(PATH.depth, m.depthCm === null ? null : cmToM(m.depthCm));
       break;
     }
-    case ID.ENV: {
-      const t = b.readInt16LE(28);
-      const nt = t === -0x8000 ? null : t / 100;
-      if (nt !== tempC) { tempC = nt; console.log(`[env] water ${tempC ?? '--'} °C`); }
-      if (tempC !== null) emitSk([{ path: 'environment.water.temperature', value: tempC + 273.15 }]);
+    case MsgId.ENV: {
+      const t = parseEnv(b).waterTempCentiC;
+      if (t !== tempCentiC) { tempCentiC = t; console.log(`[env] water ${t === null ? '--' : t / 100} °C`); }
+      emitSk(PATH.waterTemp, t === null ? null : centiCToK(t));
       break;
     }
-    case ID.ERROR:
-      console.log(`[error] flags=0x${b.readUInt32LE(16).toString(16)}`); break;
-    case ID.PING_RESULTS:
-      results.set(b[16], { channel: b[95], r0: b.readInt32LE(104), r1: b.readInt32LE(108) });
-      if (results.size > 32) results.delete(results.keys().next().value);
+    case MsgId.ERROR:
+      console.log(`[error] flags=0x${parseError(b).flags.toString(16)}`);
       break;
-    case ID.PING_DATA: {
-      if (b.readUInt32LE(16) !== 0) break;
-      const off = b.readUInt32LE(20), total = b.readUInt32LE(24);
-      const seq = b[33], seg = b[34], nseg = b[35];
-      let p = pings.get(seq);
-      if (seg === 0) { p = { buf: Buffer.alloc(total), next: 0, type: b[32], setting: b[36] }; pings.set(seq, p); }
-      if (!p || p.next !== seg) { pings.delete(seq); break; }
-      b.copy(p.buf, off, 37, len);
-      p.next++;
-      if (seg === nseg - 1) {
-        pings.delete(seq);
-        const r = results.get(seq);
-        if ((seen.get(ID.PING_DATA) ?? 0) % 200 < nseg) // throttle
-          console.log(`[ping] seq=${seq} n=${total} ch=${r?.channel ?? '?'} range=${r ? r.r0 + '..' + r.r1 : '?'} max=${Math.max(...p.buf)}`);
+    case MsgId.PING_RESULTS:
+      asm.addResults(parsePingResults(b));
+      break;
+    case MsgId.PING_DATA: {
+      const col = asm.push(parsePingData(b));
+      if (col && columns++ % 50 === 0) {
+        const r = col.results;
+        const max = col.samples.reduce((a, v) => (v > a ? v : a), 0);
+        console.log(`[ping] seq=${col.seq} n=${col.samples.length} filled=${col.filled} ch=${r?.channel ?? '?'} range=${r ? r.rangeStartCm + '..' + r.rangeEndCm : '?'} max=${max} dropped=${asm.dropped}`);
       }
       break;
     }
   }
 }
 
-process.on('SIGINT', () => {
+function summary() {
   console.log('\n[summary] message counts:');
-  for (const [id, n] of seen) console.log(`  ${NAMES[id] ?? id}: ${n}`);
-  clearInterval(kaTimer);
+  for (const [id, n] of seen) console.log(`  ${nameOf(id)}: ${n}`);
+  console.log(`  columns: ${columns}, dropped pings: ${asm.dropped}`);
+}
+
+// ---------- replay ----------
+if (opts.replay) {
+  for (const r of readRawLog(fs.readFileSync(userPath(opts.replay)))) {
+    if (r.truncated) { console.warn(`[replay] truncated record at byte ${r.truncated.offset}`); break; }
+    if (r.channel === CHANNEL.DATA || messageId(r.msg) > MsgId.UNIT) handleSonar(r.msg, r.channel === CHANNEL.DATA ? 'data' : 'disc');
+  }
+  summary();
+  skSock?.close();
   process.exit(0);
-});
+}
+
+// ---------- interface ----------
+// Candidates as the app picks them (IPv4 starting with 192.), unless --iface is given.
+const candidates = opts.iface
+  ? [{ address: opts.iface, netmask: null }]
+  : Object.values(os.networkInterfaces()).flat()
+    .filter((a) => a && a.family === 'IPv4' && !a.internal && a.address.startsWith('192.'));
+if (!candidates.length) { console.error('No 192.x interface; pass --iface'); process.exit(1); }
+
+const toInt = (ip) => ip.split('.').reduce((n, o) => (n << 8) | Number(o), 0) >>> 0;
+const sameSubnet = (a, b, mask) => ((toInt(a) & toInt(mask)) >>> 0) === ((toInt(b) & toInt(mask)) >>> 0);
+function ifaceFor(device) {
+  if (candidates.length === 1) return candidates[0].address;
+  return candidates.find((c) => sameSubnet(c.address, device, c.netmask))?.address;
+}
+console.log(`[init] candidate interfaces: ${candidates.map((c) => c.address).join(', ')}`);
+
+function fatal(where) {
+  return (e) => { console.error(`[${where}] ${e.message}`); shutdown(1); };
+}
+
+// ---------- session ----------
+let service = null, unit = null, iface = null, started = false, dataSock = null, ctrlSock = null, kaTimer = null, stale = false;
+const sameService = (a, b) => a.group === b.group && a.port === b.port && a.device === b.device && a.ctrlPort === b.ctrlPort;
+
+function stopSession() {
+  started = false;
+  clearInterval(kaTimer); kaTimer = null;
+  dataSock?.close(); dataSock = null;
+  ctrlSock?.close(); ctrlSock = null;
+  if (service && iface && service.port === DISCOVERY.port) try { disc.dropMembership(service.group, iface); } catch {}
+  for (const id of REQUIRED) seen.delete(id); // go back to "connecting" on the next session
+}
+
+function maybeStart() {
+  if (!service || !unit || started) return;
+  started = true;
+  iface = ifaceFor(service.device);
+  if (!iface) { console.error(`[init] no local interface on the subnet of ${service.device}; pass --iface`); return shutdown(1); }
+  console.log(`[init] using interface ${iface}`);
+  lastRx = Date.now();
+
+  if (service.port === DISCOVERY.port) {
+    // Same port as discovery: a second socket would receive (and decode) every datagram twice.
+    try { disc.addMembership(service.group, iface); } catch (e) { return fatal('data')(e); }
+    console.log(`[data] joined ${service.group}:${service.port} on the discovery socket`);
+  } else {
+    dataSock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    dataSock.on('error', fatal('data'));
+    dataSock.on('message', (b) => guard(() => { logRaw(CHANNEL.DATA, b); handleSonar(b, 'data'); }));
+    dataSock.bind(service.port, () => guard(() => {
+      dataSock.addMembership(service.group, iface);
+      console.log(`[data] joined ${service.group}:${service.port}`);
+    }, fatal('data')));
+  }
+
+  if (!opts.keepalive) { console.log('[ka] keepalive disabled'); kaTimer = setInterval(watchdog, 1000); return; }
+  ctrlSock = dgram.createSocket('udp4');
+  ctrlSock.on('error', fatal('ka'));
+  ctrlSock.bind(0, iface, () => { kaTimer = setInterval(tick, 1000); tick(); });
+}
+
+function tick() {
+  watchdog();
+  const k = buildKeepalive({ connected: REQUIRED.every((id) => seen.has(id)) });
+  ctrlSock?.send(k, service.ctrlPort, service.device, (e) => e && warnOnce(`ka:${e.code}`, `[ka] send failed: ${e.message}`));
+}
+
+function watchdog() {
+  const quiet = Date.now() - lastRx > 5000;
+  if (quiet && !stale) {
+    console.warn('[watchdog] no sonar data for 5 s; keepalive back to "connecting"');
+    for (const id of REQUIRED) seen.delete(id);
+    emitSk(PATH.depth, null);
+  } else if (!quiet && stale) {
+    console.log('[watchdog] data flowing again');
+  }
+  stale = quiet;
+}
+
+// Never let one bad datagram take the process down.
+function guard(fn, onError = (e) => warnOnce(`exc:${e.message}`, `[warn] ${e.stack}`)) {
+  try { fn(); } catch (e) { onError(e); }
+}
+
+// ---------- discovery ----------
+const disc = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+disc.on('error', fatal('disc'));
+disc.on('message', (b, rinfo) => guard(() => {
+  logRaw(CHANNEL.DISCOVERY, b);
+  const id = messageId(b);
+  if (id === MsgId.ANNOUNCE) {
+    const s = parseAnnounce(b);
+    if (!s) return;
+    if (s.service !== SERVICE_SONAR) {
+      if (!seen.has(`svc${s.service}`) && seen.size < 64) {
+        seen.set(`svc${s.service}`, 1);
+        console.log(`[disc] service ${s.service} port=${s.port} ${b.toString('hex', 16, 36)}`);
+      }
+      return;
+    }
+    const bad = checkService(s, rinfo.address);
+    if (bad) return warnOnce(`svc:${bad}`, `[disc] ignoring sonar announcement: ${bad}`);
+    if (service && sameService(service, s)) return;
+    if (service) { console.log('[disc] sonar service changed, restarting session', s); stopSession(); }
+    else console.log('[disc] sonar service', s);
+    service = s;
+    maybeStart();
+  } else if (id === MsgId.UNIT) {
+    const u = parseUnit(b);
+    if (u && !unit) { unit = u; console.log('[disc] unit', unit); maybeStart(); }
+  } else if (id !== null) {
+    handleSonar(b, 'disc');
+  }
+}));
+disc.bind(DISCOVERY.port, () => guard(() => {
+  // 224.0.0.1 is link-local: join it on every candidate so the announcement tells us which one is the sonar's.
+  let joined = 0;
+  for (const c of candidates) {
+    try { disc.addMembership(DISCOVERY.group, c.address); joined++; } catch (e) { console.warn(`[disc] join on ${c.address}: ${e.message}`); }
+  }
+  if (!joined) throw new Error('could not join the discovery group on any interface');
+  console.log(`[disc] listening ${DISCOVERY.group}:${DISCOVERY.port}`);
+}, fatal('disc')));
+
+// ---------- shutdown ----------
+function shutdown(code = 0) {
+  summary();
+  clearInterval(kaTimer);
+  for (const s of [disc, dataSock, ctrlSock, skSock]) try { s?.close(); } catch {}
+  if (logFd !== null) fs.closeSync(logFd);
+  process.exit(code);
+}
+process.on('SIGINT', () => shutdown(0));
+process.on('SIGTERM', () => shutdown(0));

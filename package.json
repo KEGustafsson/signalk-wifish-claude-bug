@@ -4,10 +4,11 @@
   "description": "Open interface to Raymarine Wi-Fish / Dragonfly Pro Wi-Fi sonar for Signal K",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=18.3" },
   "scripts": {
     "probe": "node tools/wifish-probe.mjs",
-    "dump": "node tools/dump-raw.mjs"
+    "dump": "node tools/dump-raw.mjs",
+    "test": "node --test"
   },
   "keywords": ["signalk", "sonar", "raymarine", "wi-fish", "dragonfly", "depth"],
   "license": "MIT"

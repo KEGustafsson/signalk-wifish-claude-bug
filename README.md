@@ -12,22 +12,36 @@ and stream echogram data to a custom sonar UI.
 |---|---|
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | "Sonar4" network protocol: discovery, keepalive, message layouts |
 | [`docs/network-setup.md`](docs/network-setup.md) | Jetson dual-homing: Ethernet default route + WLAN to the sonar |
-| [`tools/wifish-probe.mjs`](tools/wifish-probe.mjs) | Test client: discovery, keepalive, depth/temp decode, raw logging, optional Signal K UDP output |
+| [`lib/sonar4.mjs`](lib/sonar4.mjs) | Pure protocol codec: bounds-checked parsers, keepalive builder, ping reassembly |
+| [`lib/signalk.mjs`](lib/signalk.mjs) | Signal K delta builder, unit conversion, throttle |
+| [`lib/rawlog.mjs`](lib/rawlog.mjs) | Raw capture format (write/read) |
+| [`tools/wifish-probe.mjs`](tools/wifish-probe.mjs) | Test client: discovery, keepalive, depth/temp decode, raw logging, replay, optional Signal K UDP output |
 | [`tools/dump-raw.mjs`](tools/dump-raw.mjs) | Inspect raw captures from the probe |
+| [`test/`](test) | Unit tests (`npm test`, built-in `node:test`) |
 
 ## Quick start
 
-Requires Node.js 18+, no dependencies. The host must be joined to the Wi-Fish Wi-Fi.
+Requires Node.js 18.3+, no dependencies. The host must be joined to the Wi-Fish Wi-Fi.
 
 ```sh
 node tools/wifish-probe.mjs --iface <wlan IP> --log raw.bin
 node tools/wifish-probe.mjs --iface <wlan IP> --sk 127.0.0.1:<signalk udp port>
 node tools/wifish-probe.mjs --iface <wlan IP> --no-keepalive   # passive test
+node tools/wifish-probe.mjs --replay raw.bin                   # decode a capture, no device needed
 node tools/dump-raw.mjs raw.bin --id 0x270104 --hex
+npm test
 ```
 
+`--help` lists all options. Without `--iface`, the probe uses the `192.x`
+address on the same subnet as the announced sonar.
+
 Signal K paths emitted: `environment.depth.belowTransducer` (m),
-`environment.water.temperature` (K).
+`environment.water.temperature` (K). Depth is sent on change (max 5 Hz, 5 s
+heartbeat) and as `null` when bottom lock is lost, so consumers don't show a
+stale depth; temperature at most 1 Hz with a 10 s heartbeat. The depth reference
+(below transducer vs. offset-corrected) is an assumption until confirmed on
+hardware; see [PROTOCOL.md §5](docs/PROTOCOL.md). The deltas carry no `$source`,
+so the server labels them with the data connection id.
 
 ## Roadmap
 

@@ -71,7 +71,7 @@ Wi-Fi multicast lock. Receive buffer 2048 bytes.
 | 16 | u8 state: 0 = connecting, 1 = all required messages received |
 | 17 | u64 unix time (seconds) |
 | 25 | i64 −1 |
-| 33 | i32 0x80000000 |
+| 33 | i32 INT32_MIN (−2³¹, bytes `00 00 00 80`) |
 
 ## 5. Device → client messages
 
@@ -84,6 +84,9 @@ Wi-Fi multicast lock. Receive buffer 2048 bytes.
 | 0x270106 | 2556166 | System settings (also sent by client) | 562 |
 | 0x270108 | 2556168 | Master bottom record (**depth**) | 22 |
 | 0x270109 / 0x27010A | | ignored by app | |
+
+A message shorter than its minimum length, or shorter than its own header
+length field (off 4), is malformed and should be dropped.
 | 0x27010B | 2556171 | Ping results (per-ping metadata) | 130 |
 | 0x27010D | 2556173 | Error status | 20 |
 
@@ -103,9 +106,11 @@ known depth. ❓
 | Off | Type | Meaning |
 |---|---|---|
 | 28 | i16 | **water temperature, centi-°C**; `INT16_MIN` = invalid ✅ |
-| 16..67 | | ~22 further fields, unused in UI ❓ (candidates: supply voltage, speed) |
+| 16..27, 30..67 | | ~22 further fields, unused in UI ❓ (candidates: supply voltage, speed) |
 
 ### Error status — 0x27010D
+| Off | Type | Meaning |
+|---|---|---|
 | 16 | u32 | error flags; bit 0x100 selects one of two UI warnings 🟡 (likely low voltage vs. no transducer) |
 
 ### Ping data — 0x270101 ✅ (segmented; reassemble per ping)
