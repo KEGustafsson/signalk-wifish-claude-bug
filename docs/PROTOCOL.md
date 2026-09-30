@@ -84,11 +84,11 @@ Wi-Fi multicast lock. Receive buffer 2048 bytes.
 | 0x270106 | 2556166 | System settings (also sent by client) | 562 |
 | 0x270108 | 2556168 | Master bottom record (**depth**) | 22 |
 | 0x270109 / 0x27010A | | ignored by app | |
+| 0x27010B | 2556171 | Ping results (per-ping metadata) | 130 |
+| 0x27010D | 2556173 | Error status | 20 |
 
 A message shorter than its minimum length, or shorter than its own header
 length field (off 4), is malformed and should be dropped.
-| 0x27010B | 2556171 | Ping results (per-ping metadata) | 130 |
-| 0x27010D | 2556173 | Error status | 20 |
 
 ### Master bottom record — 0x270108 ✅
 | Off | Type | Meaning |

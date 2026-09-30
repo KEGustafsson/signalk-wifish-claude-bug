@@ -111,7 +111,8 @@ test('PingAssembler reassembles in-order segments and pairs results', () => {
 test('PingAssembler drops a ping on a gap, and interleaved seqs are independent', () => {
   const a = new PingAssembler();
   a.push(parsePingData(segment({ seq: 1, seg: 0, count: 3, total: 6, offset: 0, data: [1, 1] })));
-  a.push(parsePingData(segment({ seq: 2, seg: 0, count: 1, total: 2, offset: 0, data: [9, 9] })));
+  const two = a.push(parsePingData(segment({ seq: 2, seg: 0, count: 1, total: 2, offset: 0, data: [9, 9] })));
+  assert.deepEqual([...two.samples], [9, 9]);
   assert.equal(a.push(parsePingData(segment({ seq: 1, seg: 2, count: 3, total: 6, offset: 4, data: [3, 3] }))), null);
   assert.equal(a.dropped, 1);
 });
