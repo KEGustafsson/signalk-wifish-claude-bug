@@ -47,6 +47,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
   #hasUnit = false;
   #timer: NodeJS.Timeout | null = null;
   #retry: NodeJS.Timeout | null = null;
+  #rescan: NodeJS.Timeout | null = null;
   #lastRx = 0;
   #sessionAt = 0;
 
@@ -112,6 +113,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     disc.on('error', (e) => this.#scheduleRetry(`discovery socket: ${e.message}`));
     disc.on('message', (b, rinfo) => this.#onDiscovery(b, rinfo.address));
     disc.bind(DISCOVERY.port, () => {
+      if (this.#disc !== disc) return; // closed or replaced meanwhile
       let joined = 0;
       for (const c of this.#candidates) {
         try { disc.addMembership(DISCOVERY.group, c.address); joined++; } catch (e) { this.#log(`join ${DISCOVERY.group} on ${c.address}: ${(e as Error).message}`); }
@@ -119,10 +121,24 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
       if (!joined) return this.#scheduleRetry(`could not join ${DISCOVERY.group} on ${this.#candidates.map((c) => c.address).join(', ')}`);
       this.#log(`listening ${DISCOVERY.group}:${DISCOVERY.port} on ${this.#candidates.map((c) => c.address).join(', ')}`);
       this.#setLink('searching', 'Looking for a Wi-Fish / Dragonfly');
+      // The sonar Wi-Fi often comes up after the server: while no session runs,
+      // re-read the interfaces and rejoin discovery when they change.
+      this.#rescan = setInterval(() => this.#rescanInterfaces(), RETRY_MS);
     });
   }
 
+  #rescanInterfaces(): void {
+    if (!this.#running || this.#timer) return; // a session is active
+    const key = (cs: Candidate[]) => cs.map((c) => c.address).sort().join(',');
+    if (key(this.#candidatesNow()) === key(this.#candidates)) return;
+    this.#log('network interfaces changed, reopening discovery');
+    this.#close();
+    this.#open();
+  }
+
   #close(): void {
+    if (this.#rescan) clearInterval(this.#rescan);
+    this.#rescan = null;
     this.#stopSession();
     try { this.#disc?.close(); } catch { /* already closed */ }
     this.#disc = null;

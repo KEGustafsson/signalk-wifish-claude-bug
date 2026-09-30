@@ -57,7 +57,12 @@ const TYPES: Record<string, string> = {
 };
 
 function serveStatic(urlPath: string, res: http.ServerResponse): void {
-  const rel = decodeURIComponent(urlPath).replace(/^\/+/, '') || 'index.html';
+  let rel: string;
+  try {
+    rel = decodeURIComponent(urlPath).replace(/^\/+/, '') || 'index.html';
+  } catch {
+    res.statusCode = 400; res.end('bad request'); return; // malformed %-escape
+  }
   const file = path.resolve(publicDir, rel);
   if (!file.startsWith(publicDir + path.sep) && file !== publicDir) { res.statusCode = 403; res.end(); return; }
   fs.readFile(fs.existsSync(file) && fs.statSync(file).isDirectory() ? path.join(file, 'index.html') : file, (err, data) => {

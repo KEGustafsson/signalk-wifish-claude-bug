@@ -2,7 +2,9 @@ import { describe, test, expect, afterEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { plugin } from '../src/plugin';
-import { parseChannelPatch, parseSystemPatch } from '../src/api';
+import { EventEmitter } from 'node:events';
+import { Api, MAX_UNREAD_BYTES, parseChannelPatch, parseSystemPatch } from '../src/api';
+import type { Engine } from '../src/engine';
 import type { Delta } from '../src/signalk';
 
 describe('patch validation', () => {
@@ -118,5 +120,40 @@ describe('plugin lifecycle', () => {
     const { p, base } = await startPlugin({ source: 'demo' });
     p.stop();
     expect((await fetch(`${base}/api/state`)).status).toBe(503);
+  });
+});
+
+describe('SSE backpressure', () => {
+  class FakeRes extends EventEmitter {
+    writableLength = 0;
+    destroyed = false;
+    statusCode = 0;
+    chunks: string[] = [];
+    setHeader() {}
+    flushHeaders() {}
+    write(c: string) { this.chunks.push(c); this.writableLength += c.length; return true; }
+    end() {}
+    destroy() { this.destroyed = true; this.emit('close'); }
+  }
+
+  test('drops a viewer that stops reading, keeps one that reads', async () => {
+    const engine = Object.assign(new EventEmitter(), {
+      state: () => ({ link: 'connected' }),
+      history: () => [],
+    });
+    const api = new Api(() => engine as unknown as Engine);
+    api.bind();
+    const slow = new FakeRes(), fast = new FakeRes();
+    for (const r of [slow, fast]) await api.handle(Object.assign(new EventEmitter(), { method: 'GET' }) as never, r as never, '/api/stream');
+    slow.writableLength = 2 * MAX_UNREAD_BYTES; // backlog plus 4 MB of live data never drained
+    fast.writableLength = 0;
+    engine.emit('column', { ch: 'sonar', n: 1, data: '' });
+    expect(slow.destroyed).toBe(true);
+    expect(fast.destroyed).toBe(false);
+    const before = slow.chunks.length;
+    engine.emit('column', { ch: 'sonar', n: 2, data: '' });
+    expect(slow.chunks.length).toBe(before);
+    expect(fast.chunks.at(-1)).toMatch(/event: col/);
+    api.close();
   });
 });

@@ -51,6 +51,8 @@ export class Engine extends EventEmitter<EngineEvents> {
   #watchdog: NodeJS.Timeout | null = null;
   #lastData: number | null = null;
   #stale = false;
+  /** Depth paths currently published, so ones that stop applying can be cleared. */
+  #depthPaths = new Set<string>();
   #running = false;
 
   constructor(transport: Transport, opts: EngineOptions = {}) {
@@ -85,7 +87,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     s.on('temperature', (c) => { this.#temperature(c); this.#stateChanged(); });
     s.on('errorFlags', () => this.#stateChanged());
     s.on('systemStatus', () => this.#stateChanged());
-    s.on('systemSettings', () => { if (s.bottomCm !== null) this.#depth(s.bottomCm, true); this.#stateChanged(true); });
+    s.on('systemSettings', () => { this.#depth(s.bottomCm, true); this.#stateChanged(true); });
     s.on('channelSettings', () => this.#stateChanged(true));
     s.on('column', (c) => this.#column(c));
   }
@@ -181,12 +183,19 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   #depth(cm: number | null, force = false): void {
     if (!this.#opts.emitDepth) return;
+    if (cm === null && this.#depthPaths.size === 0) return; // nothing published yet, nothing to clear
     const offset = this.session.system?.transducerOffsetCm ?? 0;
     const values = depthValues(cm, offset);
+    // A path that no longer applies (offset changed sign or went to 0) gets a final null,
+    // otherwise the server would keep showing its last value.
+    const current = new Set(values.map((v) => v.path));
+    const gone: PathValue[] = [...this.#depthPaths].filter((p) => !current.has(p)).map((path) => ({ path, value: null }));
+    for (const g of gone) this.#throttles.depth.shouldEmit(g.path, null, mono());
+    this.#depthPaths = current;
     if (force) this.#throttles.depth.reset();
     const now = mono();
     // Each path goes through the throttle; one delta carries all that are due.
-    this.#emitSk(values.filter((v) => this.#throttles.depth.shouldEmit(v.path, v.value, now)));
+    this.#emitSk([...gone, ...values.filter((v) => this.#throttles.depth.shouldEmit(v.path, v.value, now))]);
   }
 
   #temperature(c: number | null): void {

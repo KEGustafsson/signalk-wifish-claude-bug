@@ -337,7 +337,14 @@ scrollEl.addEventListener('pointerdown', (e) => {
   };
   move(e);
   scrollEl.addEventListener('pointermove', move);
-  scrollEl.addEventListener('pointerup', () => scrollEl.removeEventListener('pointermove', move), { once: true });
+  // pointercancel (e.g. a system gesture) ends the drag too, or the listener would leak.
+  const end = () => {
+    scrollEl.removeEventListener('pointermove', move);
+    scrollEl.removeEventListener('pointerup', end);
+    scrollEl.removeEventListener('pointercancel', end);
+  };
+  scrollEl.addEventListener('pointerup', end);
+  scrollEl.addEventListener('pointercancel', end);
 });
 
 // ------------------------------------------------------------------ snapshot

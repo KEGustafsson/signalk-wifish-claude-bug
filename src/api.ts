@@ -11,6 +11,12 @@ import type { Engine } from './engine';
 import { CHANNELS, type ChannelName, type ChannelPatch, type ColumnMessage, type SystemPatch, type WifishState } from './shared/api';
 
 type Req = IncomingMessage & { body?: unknown };
+
+/**
+ * Live data a viewer may leave unread before it is dropped (it reconnects after
+ * `retry` and gets a fresh backlog). Counted on top of its initial backlog.
+ */
+export const MAX_UNREAD_BYTES = 4 * 1024 * 1024;
 type Res = ServerResponse & { flush?: () => void };
 
 function sendJson(res: Res, status: number, body: unknown): void {
@@ -92,7 +98,8 @@ export function backlog(engine: Pick<Engine, 'history'>): ColumnMessage[] {
 
 export class Api {
   #engine: () => Engine | null;
-  #clients = new Set<Res>();
+  /** Connected viewers and how many buffered bytes each may have before it is dropped. */
+  #clients = new Map<Res, number>();
   #unsub: (() => void) | null = null;
   #bound: Engine | null = null;
 
@@ -163,7 +170,7 @@ export class Api {
     this.#unsub?.();
     this.#unsub = null;
     this.#bound = null;
-    for (const c of this.#clients) c.end();
+    for (const c of this.#clients.keys()) c.end();
     this.#clients.clear();
   }
 
@@ -179,8 +186,8 @@ export class Api {
     this.#write(res, 'state', engine ? engine.state() : null);
     if (engine) for (const c of backlog(engine)) this.#write(res, 'col', c);
     this.#write(res, 'live', null);
-    this.#clients.add(res);
-    const ping = setInterval(() => { res.write(': ping\n\n'); res.flush?.(); }, 15_000);
+    this.#clients.set(res, res.writableLength + MAX_UNREAD_BYTES);
+    const ping = setInterval(() => { if (!res.destroyed) { res.write(': ping\n\n'); res.flush?.(); } }, 15_000);
     const done = () => { clearInterval(ping); this.#clients.delete(res); };
     req.on('close', done);
     res.on('close', done);
@@ -192,6 +199,16 @@ export class Api {
   }
 
   #broadcast(event: string, data: unknown): void {
-    for (const c of this.#clients) this.#write(c, event, data);
+    for (const [c, budget] of this.#clients) {
+      // A viewer that stopped reading (stalled proxy, suspended tab) would buffer forever.
+      if (c.writableLength > budget) {
+        this.#clients.delete(c);
+        c.destroy();
+        continue;
+      }
+      // Once its backlog has drained, hold it to the plain limit.
+      if (c.writableLength < MAX_UNREAD_BYTES && budget > MAX_UNREAD_BYTES) this.#clients.set(c, MAX_UNREAD_BYTES);
+      this.#write(c, event, data);
+    }
   }
 }

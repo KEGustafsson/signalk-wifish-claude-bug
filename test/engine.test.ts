@@ -35,6 +35,34 @@ describe('Engine', () => {
     e.stop();
   });
 
+  test('clears a depth path that stops applying when the offset changes', () => {
+    const t = new FakeTransport();
+    const deltas: Delta[] = [];
+    const e = new Engine(t, { onDelta: (d) => deltas.push(d) });
+    e.start();
+    t.feed(systemSettings(1, 50));
+    t.feed(msg(MsgId.BOTTOM, 22, (b) => b.writeInt32LE(1050, 17)));
+    deltas.length = 0;
+    t.feed(systemSettings(2, 0));
+    const values = deltas.flatMap((d) => d.updates[0].values);
+    expect(values).toContainEqual({ path: 'environment.depth.belowSurface', value: null });
+    expect(values).toContainEqual({ path: 'environment.depth.belowTransducer', value: 10.5 });
+    deltas.length = 0;
+    t.feed(systemSettings(3, -30));
+    expect(deltas.flatMap((d) => d.updates[0].values)).toContainEqual({ path: 'environment.depth.belowKeel', value: 10.5 });
+    e.stop();
+  });
+
+  test('publishes nothing for depth before the first bottom record', () => {
+    const t = new FakeTransport();
+    const deltas: Delta[] = [];
+    const e = new Engine(t, { onDelta: (d) => deltas.push(d) });
+    e.start();
+    t.feed(systemSettings(1, 50));
+    expect(deltas).toHaveLength(0);
+    e.stop();
+  });
+
   test('can turn Signal K output off', () => {
     const t = new FakeTransport();
     const deltas: Delta[] = [];
