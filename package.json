@@ -19,7 +19,7 @@
   },
   "scripts": {
     "build": "npm run build:server && npm run build:web",
-    "build:server": "tsc -p tsconfig.json",
+    "build:server": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "build:web": "node web/build.mjs",
     "watch:web": "node web/build.mjs --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",

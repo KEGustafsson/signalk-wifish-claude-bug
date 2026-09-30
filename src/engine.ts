@@ -27,6 +27,14 @@ export interface EngineEvents {
 }
 
 const NAMES: readonly ChannelName[] = CHANNELS;
+/** The app keeps showing the last depth this long after bottom lock is lost (msg 105). */
+export const DEPTH_HOLD_MS = 6000;
+
+/** History size from (possibly hand-edited) config: finite, 0..20000, default 1500. */
+function clampColumns(v: unknown): number {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+  return Number.isFinite(n) ? Math.max(0, Math.min(20_000, Math.round(n))) : 1500;
+}
 const mono = () => globalThis.performance.now();
 
 function view(s: ChannelSettings | null): ChannelSettingsView | null {
@@ -54,13 +62,18 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** Depth paths currently published, so ones that stop applying can be cleared. */
   #depthPaths = new Set<string>();
   #running = false;
+  #stopped = false;
+  #tempPublished = false;
+  /** Depth shown to viewers: the last valid depth, held DEPTH_HOLD_MS after lock is lost. */
+  #shownDepthCm: number | null = null;
+  #holdTimer: NodeJS.Timeout | null = null;
 
   constructor(transport: Transport, opts: EngineOptions = {}) {
     super();
     this.setMaxListeners(0);
     this.transport = transport;
     this.#opts = {
-      historyColumns: Math.max(0, Math.min(20_000, opts.historyColumns ?? 1500)),
+      historyColumns: clampColumns(opts.historyColumns),
       emitDepth: opts.emitDepth ?? true,
       emitTemperature: opts.emitTemperature ?? true,
       onDelta: opts.onDelta,
@@ -68,22 +81,31 @@ export class Engine extends EventEmitter<EngineEvents> {
     };
     const s = this.session;
     transport.on('datagram', (b) => {
+      let id: number | null = null;
       try {
-        const id = s.handle(b);
-        if (id !== null && id >>> 8 === 0x2701) this.#lastData = mono();
+        id = s.handle(b);
       } catch (e) {
-        this.#opts.log?.(`decode error: ${(e as Error).message}`);
+        this.#opts.log?.(`error handling a datagram: ${(e as Error).message}`);
       }
+      if (id !== null && id >>> 8 === 0x2701) this.#lastData = mono();
     });
     transport.on('link', (state, msg) => {
+      const prev = this.#link;
       this.#link = state;
       this.#message = msg;
-      if (state === 'searching' || state === 'offline') s.reset();
+      // A new session (not a recovery from 'lost') starts from scratch, like the app's decoder reset.
+      if (state === 'searching' || state === 'offline' || (state === 'connecting' && prev !== 'lost')) {
+        s.reset();
+        this.#clearReadings();
+      } else if (state === 'lost') {
+        // The app blanks depth and water temperature when the connection drops (msg 11/12).
+        this.#clearReadings();
+      }
       this.#stateChanged(true);
     });
     s.on('warn', (m) => this.#opts.log?.(m));
     s.on('unit', () => this.#stateChanged());
-    s.on('bottom', (cm) => { this.#depth(cm); this.#stateChanged(); });
+    s.on('bottom', (cm) => { this.#depth(cm); this.#showDepth(cm); });
     s.on('temperature', (c) => { this.#temperature(c); this.#stateChanged(); });
     s.on('errorFlags', () => this.#stateChanged());
     s.on('systemStatus', () => this.#stateChanged());
@@ -93,7 +115,8 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   start(): void {
-    if (this.#running) return;
+    if (this.#running || this.#stopped) return; // listeners are gone after stop(); make a new Engine
+
     this.#running = true;
     this.#watchdog = setInterval(() => this.#checkStale(), 1000);
     this.transport.start();
@@ -102,6 +125,9 @@ export class Engine extends EventEmitter<EngineEvents> {
   stop(): void {
     if (!this.#running) return;
     this.#running = false;
+    this.#stopped = true;
+    if (this.#holdTimer) clearTimeout(this.#holdTimer);
+    this.#holdTimer = null;
     if (this.#watchdog) clearInterval(this.#watchdog);
     if (this.#stateTimer) clearTimeout(this.#stateTimer);
     this.#watchdog = this.#stateTimer = null;
@@ -130,13 +156,13 @@ export class Engine extends EventEmitter<EngineEvents> {
       canControl: this.transport.canSend && this.#link !== 'offline',
       unit: u ? { type: u.type, model: UNIT_TYPES[u.type] ?? `Unit ${u.type}`, name: u.name, serial: u.serial, wifish: u.type === UNIT_WIFISH } : null,
       softwareVersion: st ? `${st.swMajor}.${st.swMinor}` : null,
-      depthCm: s.bottomCm,
+      depthCm: this.#shownDepthCm,
       waterTempCentiC: s.waterTempCentiC,
       lowVoltage: s.errorFlags !== null && (s.errorFlags & ERROR_LOW_VOLTAGE) !== 0,
       system: sys ? { transducerOffsetCm: sys.transducerOffsetCm, depthUnit: sys.depthUnit, simulator: sys.simulator } : null,
       channels: {
-        sonar: view(s.channelSettings(s.configIndex[0])),
-        downvision: view(s.channelSettings(s.configIndex[1])),
+        sonar: view(s.channelSettings(s.indexFor(0))),
+        downvision: view(s.channelSettings(s.indexFor(1))),
       },
       active: { sonar: this.#n.sonar > 0, downvision: this.#n.downvision > 0 },
     };
@@ -146,8 +172,20 @@ export class Engine extends EventEmitter<EngineEvents> {
   setChannel(ch: ChannelName, patch: ChannelPatch): string | null {
     if (!this.transport.canSend) return 'Sonar settings cannot be changed in this mode';
     const code: ChannelId = ch === 'sonar' ? 0 : 1;
-    if (this.session.configIndex[code] === null) return `No ${ch} data yet`;
-    const msgs = this.session.buildChannelCommands(code, patch);
+    const p = { ...patch };
+    // Picking a Shallow or Deep preset turns Auto range off, as in the app.
+    if ((p.rangeShallowCm !== undefined || p.rangeDeepCm !== undefined) && p.rangeAuto === undefined) p.rangeAuto = false;
+    // Range goes to both channels: it must stay shallow < deep against what each one holds.
+    for (const c of [0, 1] as const) {
+      const held = this.session.channelSettings(this.session.indexFor(c));
+      if (!held) continue;
+      const shallow = p.rangeShallowCm ?? held.rangeShallowCm;
+      const deep = p.rangeDeepCm ?? held.rangeDeepCm;
+      if ((p.rangeShallowCm !== undefined || p.rangeDeepCm !== undefined) && shallow >= deep) {
+        return 'Shallow must be less than Deep';
+      }
+    }
+    const msgs = this.session.buildChannelCommands(code, p);
     if (!msgs.length) return 'Channel settings not received from the sonar yet';
     for (const m of msgs) this.transport.send(m);
     return null;
@@ -200,6 +238,8 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   #temperature(c: number | null): void {
     if (!this.#opts.emitTemperature) return;
+    if (c === null && !this.#tempPublished) return; // nothing to clear yet
+    this.#tempPublished = c !== null;
     const value = c === null ? null : centiCToK(c);
     if (this.#throttles.temp.shouldEmit(PATH.waterTemp, value, mono())) this.#emitSk([{ path: PATH.waterTemp, value }]);
   }
@@ -207,11 +247,38 @@ export class Engine extends EventEmitter<EngineEvents> {
   #checkStale(): void {
     const quiet = this.#lastData !== null && mono() - this.#lastData > 5000;
     if (quiet && !this.#stale) {
-      this.session.bottomCm = null;
-      this.#depth(null, true);
+      this.#clearReadings();
       this.#stateChanged(true);
     }
     this.#stale = quiet;
+  }
+
+  /** No trustworthy readings any more: publish null depth and temperature, blank the display. */
+  #clearReadings(): void {
+    const s = this.session;
+    if (s.bottomCm !== null || this.#depthPaths.size) { s.bottomCm = null; this.#depth(null, true); }
+    if (s.waterTempCentiC !== null) { s.waterTempCentiC = null; }
+    this.#temperature(null);
+    if (this.#holdTimer) clearTimeout(this.#holdTimer);
+    this.#holdTimer = null;
+    this.#shownDepthCm = null;
+  }
+
+  /** Readout like the app: a valid depth shows at once; no lock blanks it only after DEPTH_HOLD_MS. */
+  #showDepth(cm: number | null): void {
+    if (cm !== null) {
+      if (this.#holdTimer) clearTimeout(this.#holdTimer);
+      this.#holdTimer = null;
+      this.#shownDepthCm = Math.max(0, cm);
+      this.#stateChanged();
+      return;
+    }
+    if (this.#holdTimer || this.#shownDepthCm === null) return;
+    this.#holdTimer = setTimeout(() => {
+      this.#holdTimer = null;
+      this.#shownDepthCm = null;
+      this.#stateChanged(true);
+    }, DEPTH_HOLD_MS);
   }
 
   #column(c: SessionColumn): void {

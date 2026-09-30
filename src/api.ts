@@ -17,6 +17,8 @@ type Req = IncomingMessage & { body?: unknown };
  * `retry` and gets a fresh backlog). Counted on top of its initial backlog.
  */
 export const MAX_UNREAD_BYTES = 4 * 1024 * 1024;
+/** Concurrent event streams; each holds a copy of the backlog while it drains. */
+export const MAX_STREAMS = 16;
 type Res = ServerResponse & { flush?: () => void };
 
 function sendJson(res: Res, status: number, body: unknown): void {
@@ -111,39 +113,47 @@ export class Api {
   /** Route a request whose path is relative to the plugin root. Returns false when not ours. */
   async handle(req: Req, res: Res, path: string): Promise<boolean> {
     const method = req.method ?? 'GET';
-    const engine = this.#engine();
-    try {
-      if (method === 'GET' && path === '/api/state') {
-        if (!engine) sendJson(res, 503, { error: 'plugin not running' });
-        else sendJson(res, 200, engine.state());
-        return true;
-      }
-      if (method === 'GET' && path === '/api/stream') {
-        this.#stream(req, res);
-        return true;
-      }
-      const m = /^\/api\/channel\/(sonar|downvision)$/.exec(path);
-      if (method === 'POST' && m) {
-        if (!engine) return sendJson(res, 503, { error: 'plugin not running' }), true;
-        const patch = parseChannelPatch(await readBody(req));
-        if (typeof patch === 'string') return sendJson(res, 400, { error: patch }), true;
-        const err = engine.setChannel(m[1] as ChannelName, patch);
-        sendJson(res, err ? 409 : 200, err ? { error: err } : engine.state());
-        return true;
-      }
-      if (method === 'POST' && path === '/api/system') {
-        if (!engine) return sendJson(res, 503, { error: 'plugin not running' }), true;
-        const patch = parseSystemPatch(await readBody(req));
-        if (typeof patch === 'string') return sendJson(res, 400, { error: patch }), true;
-        const err = engine.setSystem(patch);
-        sendJson(res, err ? 409 : 200, err ? { error: err } : engine.state());
-        return true;
-      }
-    } catch (e) {
-      sendJson(res, 400, { error: (e as Error).message });
+    if (method === 'GET' && path === '/api/state') {
+      const engine = this.#engine();
+      if (!engine) sendJson(res, 503, { error: 'plugin not running' });
+      else sendJson(res, 200, engine.state());
       return true;
     }
-    return false;
+    if (method === 'GET' && path === '/api/stream') {
+      if (this.#clients.size >= MAX_STREAMS) return sendJson(res, 503, { error: 'too many viewers' }), true;
+      this.#stream(req, res);
+      return true;
+    }
+    const m = /^\/api\/channel\/(sonar|downvision)$/.exec(path);
+    if (method !== 'POST' || (!m && path !== '/api/system')) return false;
+    // JSON only: a cross-site form or text/plain POST (no CORS preflight) must not reach the sonar.
+    if (!/^application\/json\b/i.test(String(req.headers['content-type'] ?? ''))) {
+      return sendJson(res, 415, { error: 'Content-Type must be application/json' }), true;
+    }
+    let body: unknown;
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return sendJson(res, 400, { error: e instanceof SyntaxError ? 'invalid JSON' : (e as Error).message }), true;
+    }
+    const engine = this.#engine(); // read after the body: the plugin may have restarted meanwhile
+    if (!engine) return sendJson(res, 503, { error: 'plugin not running' }), true;
+    try {
+      let err: string | null;
+      if (m) {
+        const patch = parseChannelPatch(body);
+        if (typeof patch === 'string') return sendJson(res, 400, { error: patch }), true;
+        err = engine.setChannel(m[1] as ChannelName, patch);
+      } else {
+        const patch = parseSystemPatch(body);
+        if (typeof patch === 'string') return sendJson(res, 400, { error: patch }), true;
+        err = engine.setSystem(patch);
+      }
+      sendJson(res, err ? 409 : 200, err ? { error: err } : engine.state());
+    } catch {
+      sendJson(res, 500, { error: 'internal error' });
+    }
+    return true;
   }
 
   /** Call after the engine was (re)created so live events reach connected viewers. */

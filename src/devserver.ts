@@ -22,13 +22,13 @@ const { values } = parseArgs({
     passive: { type: 'boolean', default: false },
     replay: { type: 'string' },
     port: { type: 'string', default: '3000' },
-    host: { type: 'string', default: '0.0.0.0' },
+    host: { type: 'string', default: '127.0.0.1' },
     deltas: { type: 'boolean', default: false },
     help: { type: 'boolean', short: 'h', default: false },
   },
 });
 if (values.help) {
-  console.log('Usage: devserver [--demo [--wifish] | --device [--iface ip] [--passive] | --replay file] [--port 3000] [--deltas]');
+  console.log('Usage: devserver [--demo [--wifish] | --device [--iface ip] [--passive] | --replay file] [--port 3000] [--host 127.0.0.1] [--deltas]');
   process.exit(0);
 }
 
@@ -63,6 +63,7 @@ function serveStatic(urlPath: string, res: http.ServerResponse): void {
   } catch {
     res.statusCode = 400; res.end('bad request'); return; // malformed %-escape
   }
+  if (rel.includes('\0')) { res.statusCode = 400; res.end('bad request'); return; }
   const file = path.resolve(publicDir, rel);
   if (!file.startsWith(publicDir + path.sep) && file !== publicDir) { res.statusCode = 403; res.end(); return; }
   fs.readFile(fs.existsSync(file) && fs.statSync(file).isDirectory() ? path.join(file, 'index.html') : file, (err, data) => {
@@ -73,6 +74,16 @@ function serveStatic(urlPath: string, res: http.ServerResponse): void {
 }
 
 const server = http.createServer((req, res) => {
+  try {
+    route(req, res);
+  } catch {
+    // Never let one odd request (bad absolute-form target, invalid path) stop the server.
+    if (!res.headersSent) res.statusCode = 400;
+    res.end();
+  }
+});
+
+function route(req: http.IncomingMessage, res: http.ServerResponse): void {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const pluginRoot = `/plugins/${PLUGIN_ID}`;
   if (url.pathname.startsWith(pluginRoot + '/') && apiHandler) {
@@ -83,7 +94,7 @@ const server = http.createServer((req, res) => {
   }
   const appRoot = `/${PLUGIN_ID}`;
   serveStatic(url.pathname.startsWith(appRoot) ? url.pathname.slice(appRoot.length) : url.pathname, res);
-});
+}
 
 p.start(cfg);
 server.listen(Number(values.port), values.host, () => {

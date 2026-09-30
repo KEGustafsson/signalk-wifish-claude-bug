@@ -4,7 +4,7 @@
 
 import { EventEmitter } from 'node:events';
 import {
-  VERSION, MsgId, REQUIRED, messageId, parseHeader, isWellFormed, parseUnit, parseBottom, parseEnv,
+  VERSION, MsgId, REQUIRED, PING_CONFIGS, messageId, parseHeader, isWellFormed, parseUnit, parseBottom, parseEnv,
   parseError, parseSystemStatus, parsePingResults, parsePingData, parseChannelSettings, parseSystemSettings,
   buildChannelSettings, buildSystemSettings, PingAssembler,
   type Unit, type SystemStatus, type ChannelSettings, type SystemSettings, type ChannelSettingsPatch,
@@ -38,7 +38,7 @@ export interface SessionEvents {
 
 export class Sonar4Session extends EventEmitter<SessionEvents> {
   readonly seen = new Map<number, number>();
-  readonly asm = new PingAssembler();
+  asm = new PingAssembler();
   unit: Unit | null = null;
   bottomCm: number | null = null;
   waterTempCentiC: number | null = null;
@@ -57,19 +57,25 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
   channelSettings(index: number | null): ChannelSettings | null {
     return index === null ? null : this.#channels.get(index)?.parsed ?? null;
   }
-  /** All REQUIRED messages seen at least once: keepalive may report "connected". */
+  /**
+   * Keepalive may report "connected" (§3.4): like the app, the unit id, every
+   * REQUIRED message and all PING_CONFIGS channel settings have been received.
+   */
   get ready(): boolean {
-    return REQUIRED.every((id) => this.seen.has(id));
+    return this.unit !== null && this.#channels.size >= PING_CONFIGS && REQUIRED.every((id) => this.seen.has(id));
   }
 
   /** Forget per-connection state (the app resets its decoders on reconnect). */
   reset(): void {
     this.seen.clear();
+    this.unit = null;
     this.#system = null;
     this.#channels.clear();
     this.configIndex[0] = this.configIndex[1] = null;
     this.bottomCm = null;
+    this.waterTempCentiC = null;
     this.errorFlags = null;
+    this.asm = new PingAssembler();
   }
 
   #warnOnce(key: string, msg: string): void {
@@ -100,8 +106,7 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
       this.#warnOnce(`len${h.id}`, `${hex} malformed (${b.length} bytes, header says ${h.length}), dropping these`);
       return null;
     }
-    this.seen.set(h.id, (this.seen.get(h.id) ?? 0) + 1);
-
+    let ok = true;
     switch (h.id) {
       case MsgId.BOTTOM: {
         const m = parseBottom(b)!;
@@ -120,11 +125,12 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
         break;
       case MsgId.SYS_STATUS: {
         const s = parseSystemStatus(b);
-        if (s) { this.systemStatus = s; this.emit('systemStatus', s); }
+        if (s) { this.systemStatus = s; this.emit('systemStatus', s); } else ok = false;
         break;
       }
       case MsgId.SYS_SETTINGS: {
         const s = parseSystemSettings(b);
+        if (!s) ok = false;
         // Like the app: only a newer seq replaces what we hold (our own echo is not newer).
         if (s && (!this.#system || s.seq > this.#system.parsed.seq)) {
           this.#system = { parsed: s, raw: Uint8Array.from(b) };
@@ -134,7 +140,7 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
       }
       case MsgId.CHAN_SETTINGS: {
         const s = parseChannelSettings(b);
-        if (!s) { this.#warnOnce('chanset', 'channel settings with bad size or index, ignored'); break; }
+        if (!s) { ok = false; this.#warnOnce('chanset', 'channel settings with bad size or index, ignored'); break; }
         const held = this.#channels.get(s.index);
         if (!held || s.seq > held.parsed.seq) {
           this.#channels.set(s.index, { parsed: s, raw: Uint8Array.from(b) });
@@ -142,31 +148,40 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
         }
         break;
       }
-      case MsgId.PING_RESULTS:
-        this.asm.addResults(parsePingResults(b));
+      case MsgId.PING_RESULTS: {
+        // Results may follow their ping data; the assembler hands back the waiting column.
+        const col = this.asm.addResults(parsePingResults(b), now);
+        if (col) this.#column(col.results, col.setting, col.seq, col.samples);
         break;
+      }
       case MsgId.PING_DATA: {
         const col = this.asm.push(parsePingData(b), now);
         if (col) this.#column(col.results, col.setting, col.seq, col.samples);
         break;
       }
     }
-    return h.id;
+    if (ok) this.seen.set(h.id, (this.seen.get(h.id) ?? 0) + 1);
+    return ok ? h.id : null;
   }
 
   #column(r: ReturnType<typeof parsePingResults>, configIndex: number, seq: number, samples: Uint8Array): void {
     if (!r || (r.channel !== 0 && r.channel !== 1)) return; // can't tell which trace it belongs to
     const channel = r.channel as ChannelId;
     const cs = this.channelSettings(configIndex);
-    if (cs && !cs.enabled) return; // the app skips configurations it holds as disabled
+    // The app draws only configurations whose settings it holds as enabled (e0.f.n()).
+    if (!cs || !cs.enabled) return;
     this.configIndex[channel] = configIndex;
-    const auto = cs ? cs.rangeAuto : true;
-    let startCm = auto ? r.rangeStartCm : cs!.rangeShallowCm;
-    let endCm = auto ? r.rangeEndCm : cs!.rangeDeepCm;
+    let startCm = cs.rangeAuto ? r.rangeStartCm : cs.rangeShallowCm;
+    let endCm = cs.rangeAuto ? r.rangeEndCm : cs.rangeDeepCm;
     if (!(endCm > 0)) { endCm = r.rangeEndCm > 0 ? r.rangeEndCm : 1000; }
     if (!(startCm >= 0 && startCm < endCm)) startCm = 0;
     this.columns++;
     this.emit('column', { channel, configIndex, seq, samples, startCm, endCm });
+  }
+
+  /** Ping configuration used for `ch`: the last one seen in its data, else the app's defaults (sonar 0, DownVision 1). */
+  indexFor(ch: ChannelId): number {
+    return this.configIndex[ch] ?? (ch === 1 ? 1 : 0);
   }
 
   /**
@@ -183,13 +198,13 @@ export class Sonar4Session extends EventEmitter<SessionEvents> {
     for (const ch of [0, 1] as const) {
       const p: ChannelSettingsPatch = { ...range, ...(ch === channel ? own : {}) };
       if (!Object.keys(p).length) continue;
-      const idx = this.configIndex[ch];
-      const held = idx === null ? undefined : this.#channels.get(idx);
+      const idx = this.indexFor(ch);
+      const held = this.#channels.get(idx);
       if (!held) continue;
       const seq = held.parsed.seq + 1;
       const raw = buildChannelSettings(held.raw, p, seq);
-      this.#channels.set(idx!, { parsed: parseChannelSettings(raw)!, raw });
-      this.emit('channelSettings', this.#channels.get(idx!)!.parsed);
+      this.#channels.set(idx, { parsed: parseChannelSettings(raw)!, raw });
+      this.emit('channelSettings', this.#channels.get(idx)!.parsed);
       out.push(raw);
     }
     return out;

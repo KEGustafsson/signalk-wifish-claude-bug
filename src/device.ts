@@ -20,7 +20,8 @@ export interface DeviceOptions {
 }
 
 const RETRY_MS = 5000;
-const QUIET_MS = 5000;
+/** The app's receive timeout before it reports a lost connection (a0.d setSoTimeout). */
+const QUIET_MS = 3000;
 /** After this long without data, drop the session and wait for a fresh announcement. */
 const GIVE_UP_MS = 20_000;
 
@@ -37,7 +38,8 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
   #opts: DeviceOptions;
   #log: (msg: string) => void;
   #running = false;
-  #link: LinkState = 'offline';
+  /** null until the first state is reported, so an initial 'offline' is not swallowed. */
+  #link: LinkState | null = null;
   #candidates: Candidate[] = [];
   #disc: dgram.Socket | null = null;
   #data: dgram.Socket | null = null;
@@ -48,6 +50,7 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
   #timer: NodeJS.Timeout | null = null;
   #retry: NodeJS.Timeout | null = null;
   #rescan: NodeJS.Timeout | null = null;
+  #message = '';
   #lastRx = 0;
   #sessionAt = 0;
 
@@ -58,11 +61,12 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
     this.#log = opts.log ?? (() => {});
   }
 
-  get link(): LinkState { return this.#link; }
+  get link(): LinkState { return this.#link ?? 'offline'; }
   get service(): Announce | null { return this.#service; }
 
   #setLink(s: LinkState, msg: string): void {
-    if (s === this.#link) return;
+    if (s === this.#link && msg === this.#message) return;
+    this.#message = msg;
     this.#link = s;
     this.emit('link', s, msg);
   }
@@ -118,7 +122,9 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
       for (const c of this.#candidates) {
         try { disc.addMembership(DISCOVERY.group, c.address); joined++; } catch (e) { this.#log(`join ${DISCOVERY.group} on ${c.address}: ${(e as Error).message}`); }
       }
-      if (!joined) return this.#scheduleRetry(`could not join ${DISCOVERY.group} on ${this.#candidates.map((c) => c.address).join(', ')}`);
+      // 224.0.0.1 is the all-hosts group every interface is already in; if the explicit
+      // join is refused (some BSD stacks), keep listening instead of giving up.
+      if (!joined) this.#log(`could not join ${DISCOVERY.group} explicitly; listening anyway`);
       this.#log(`listening ${DISCOVERY.group}:${DISCOVERY.port} on ${this.#candidates.map((c) => c.address).join(', ')}`);
       this.#setLink('searching', 'Looking for a Wi-Fish / Dragonfly');
       // The sonar Wi-Fi often comes up after the server: while no session runs,
@@ -152,7 +158,11 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
       const bad = checkService(s, sender);
       if (bad) return this.#log(`ignoring sonar announcement: ${bad}`);
       if (this.#service && sameService(this.#service, s)) return;
-      if (this.#service) { this.#log('sonar service changed, restarting session'); this.#stopSession(); }
+      if (this.#service) {
+        this.#log('sonar service changed, restarting session');
+        this.#stopSession();
+        this.#setLink('searching', 'Sonar service changed'); // a new session: forget the old one's state
+      }
       this.#service = s;
       this.#maybeStart();
     } else if (id === MsgId.UNIT) {
@@ -214,9 +224,11 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
   #tick(): void {
     const quiet = mono() - this.#lastRx;
     if (quiet > GIVE_UP_MS && mono() - this.#sessionAt > GIVE_UP_MS) {
-      this.#log('no sonar data, waiting for a new announcement');
-      this.#stopSession();
+      this.#log('no sonar data, rejoining discovery');
       this.#setLink('searching', 'Sonar offline. Looking for a Wi-Fish / Dragonfly');
+      // Reopen discovery too: a reconnected adapter may have dropped the socket's memberships.
+      this.#close();
+      this.#open();
       return;
     }
     if (quiet > QUIET_MS && this.#link === 'connected') this.#setLink('lost', 'Trying to restore connection to the sounder');

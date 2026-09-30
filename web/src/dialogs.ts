@@ -37,14 +37,34 @@ export interface DialogOptions {
   onClose?: () => void;
 }
 
+let dialogIds = 0;
+const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function openDialog(content: Node, opts: DialogOptions = {}): DialogHandle {
   const layer = h('div', { class: `dialog-layer${opts.modal ? ' modal' : ''}` });
-  const box = h('div', { class: `dialog ${opts.className ?? ''}`, role: 'dialog', 'aria-modal': opts.modal ? 'true' : undefined });
-  if (opts.title) box.append(h('div', { class: 'dialog-title' }, opts.title));
+  const box = h('div', { class: `dialog ${opts.className ?? ''}`, role: 'dialog', 'aria-modal': opts.modal ? 'true' : undefined, tabindex: -1 });
+  if (opts.title) {
+    const id = `dialog-title-${++dialogIds}`;
+    box.append(h('div', { class: 'dialog-title', id }, opts.title));
+    box.setAttribute('aria-labelledby', id);
+  }
   box.append(content);
   layer.append(box);
   document.body.append(layer);
+  const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   let open = true;
+  const focusables = () => [...box.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((e) => e.offsetParent !== null);
+  // Keep Tab inside a modal dialog.
+  const trap = (e: KeyboardEvent) => {
+    if (e.key !== 'Tab' || !opts.modal || stack[stack.length - 1] !== handle) return;
+    const f = focusables();
+    if (!f.length) { e.preventDefault(); box.focus(); return; }
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === box)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  document.addEventListener('keydown', trap);
+  const onResize = () => place?.();
   const handle: DialogHandle = {
     el: box,
     get open() { return open; },
@@ -52,27 +72,38 @@ export function openDialog(content: Node, opts: DialogOptions = {}): DialogHandl
       if (!open) return;
       open = false;
       layer.remove();
+      document.removeEventListener('keydown', trap);
+      window.removeEventListener('resize', onResize);
       stack = stack.filter((d) => d !== handle);
       opts.onClose?.();
+      if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     },
   };
   if (opts.dismissable !== false) {
     layer.addEventListener('pointerdown', (e) => { if (e.target === layer) handle.close(); });
   }
+  let place: (() => void) | null = null;
   if (opts.anchor) {
-    const r = opts.anchor.getBoundingClientRect();
+    const anchor = opts.anchor;
     box.classList.add('anchored');
-    const place = () => {
+    place = () => {
+      const r = anchor.getBoundingClientRect();
       const bw = box.offsetWidth;
       const left = Math.max(8, Math.min(window.innerWidth - bw - 8, r.left + r.width / 2 - 34));
+      const top = Math.min(r.bottom + 10, Math.max(8, window.innerHeight - 120));
       box.style.left = `${left}px`;
-      box.style.top = `${r.bottom + 10}px`;
+      box.style.top = `${top}px`;
+      // Short screens (phone in landscape): scroll inside the popover rather than run off the screen.
+      box.style.maxHeight = `${Math.max(100, window.innerHeight - top - 8)}px`;
       box.style.setProperty('--arrow-x', `${Math.max(14, Math.min(bw - 14, r.left + r.width / 2 - left))}px`);
     };
-    requestAnimationFrame(place);
+    window.addEventListener('resize', onResize);
+    requestAnimationFrame(() => place?.());
     place();
   }
   stack.push(handle);
+  // Move focus into the dialog so keyboard and screen-reader users land in it.
+  requestAnimationFrame(() => { if (open) (focusables()[0] ?? box).focus({ preventScroll: true }); });
   return handle;
 }
 
@@ -98,10 +129,13 @@ export function messageBox(title: string, text: string, buttons: { label: string
 
 // ------------------------------------------------------------------ form widgets
 
+const VALUE_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End']);
+
 function slider(value: number, onInput: (v: number) => void, onStart: () => void): HTMLInputElement {
   const s = h('input', { type: 'range', min: 0, max: 100, step: 1, value, class: 'slider' });
   s.addEventListener('pointerdown', onStart);
-  s.addEventListener('keydown', onStart);
+  // Only keys that change the value count as adjusting it (Tab or Escape must not turn Auto off).
+  s.addEventListener('keydown', (e) => { if (VALUE_KEYS.has(e.key)) onStart(); });
   s.addEventListener('input', () => onInput(Number(s.value)));
   return s;
 }
@@ -166,7 +200,6 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
 
   let dragging: string | null = null;
   const send = (patch: ChannelPatch) => { ctx.sendChannel(ch, patch).catch(() => {}); };
-  const sendLater = debounce<ChannelPatch>(send, 180);
   const controlsEnabled = () => !!ctx.state()?.canControl && !!ctx.state()?.channels[ch];
 
   // --- Sensitivity
@@ -176,6 +209,7 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
   for (const [key, label] of [['gain', 'Gain'], ['contrast', 'Contrast'], ['noiseFilter', 'Noise filter']] as [SKey, string][]) {
     const autoKey = `${key}Auto` as const;
     const value = h('span', { class: 'value' });
+    const sendLater = debounce<ChannelPatch>(send, 180); // one per slider, so a quick move on another one can't swallow this value
     const sl = slider(0, (v) => {
       value.textContent = String(v);
       sendLater({ [key]: v });
@@ -196,25 +230,35 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
   const rangeAuto = checkbox(true, (v) => send({ rangeAuto: v }), 'Range auto');
   const shallow = h('select', { class: 'select', 'aria-label': 'Shallow' });
   const deep = h('select', { class: 'select', 'aria-label': 'Deep' });
-  shallow.addEventListener('change', () => { rangeAuto.checked = false; send({ rangeAuto: false, rangeShallowCm: Number(shallow.value) }); });
-  deep.addEventListener('change', () => { rangeAuto.checked = false; send({ rangeAuto: false, rangeDeepCm: Number(deep.value) }); });
+  shallow.addEventListener('change', () => {
+    rangeAuto.checked = false;
+    send({ rangeAuto: false, rangeShallowCm: Number(shallow.value) });
+    fillRange(Number(shallow.value), Number(deep.value), 'deep'); // Deep may only offer presets below the new Shallow
+  });
+  deep.addEventListener('change', () => {
+    rangeAuto.checked = false;
+    send({ rangeAuto: false, rangeDeepCm: Number(deep.value) });
+    fillRange(Number(shallow.value), Number(deep.value), 'shallow');
+  });
   const range = h('div', { class: 'panel grid-range' },
     h('span', { class: 'label' }, 'Auto'), rangeAuto, h('span'),
     h('span', { class: 'label' }, 'Shallow'), shallow, unitLabelA,
     h('span', { class: 'label' }, 'Deep'), deep, unitLabelB);
 
-  const fillRange = (cs: ChannelSettingsView) => {
+  /** Rebuild the preset lists; `only` limits it to one list (the other one may be open or focused). */
+  function fillRange(shallowCm: number, deepCm: number, only?: 'shallow' | 'deep'): void {
     const u = ctx.depthUnit();
     unitLabelA.textContent = unitLabelB.textContent = u.symbol;
     const presets = u.ranges.map((r, i) => ({ cm: presetCm(u, i), label: String(r) }));
     const opt = (list: typeof presets, sel: number) => {
+      if (!list.length) return [];
       const near = list.reduce((a, b) => (Math.abs(b.cm - sel) < Math.abs(a.cm - sel) ? b : a), list[0]);
       return list.map((p) => { const o = h('option', { value: p.cm }, p.label); if (p === near) o.selected = true; return o; });
     };
     // Shallow offers presets below Deep, Deep presets above Shallow (app: g0.a).
-    shallow.replaceChildren(...opt(presets.filter((p) => p.cm < cs.rangeDeepCm), cs.rangeShallowCm));
-    deep.replaceChildren(...opt(presets.filter((p) => p.cm > cs.rangeShallowCm), cs.rangeDeepCm));
-  };
+    if (only !== 'deep') shallow.replaceChildren(...opt(presets.filter((p) => p.cm < deepCm), shallowCm));
+    if (only !== 'shallow') deep.replaceChildren(...opt(presets.filter((p) => p.cm > shallowCm), deepCm));
+  }
 
   // --- Options
   const palIds = ch === 'sonar' ? SONAR_PALETTES : DOWNVISION_PALETTES;
@@ -238,15 +282,30 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
 
   const panelEls = [sens, range, options];
   panels.append(...panelEls);
+  const uid = `ss-${ch}`;
+  panelEls.forEach((p, i) => { p.id = `${uid}-panel-${i}`; p.setAttribute('role', 'tabpanel'); p.setAttribute('aria-labelledby', `${uid}-tab-${i}`); });
   const tabEls = TABS.map((t, i) => {
-    const b = h('button', { class: 'tab', role: 'tab' }, t);
+    const b = h('button', { class: 'tab', role: 'tab', id: `${uid}-tab-${i}`, 'aria-controls': `${uid}-panel-${i}` }, t);
     b.addEventListener('click', () => select_(i));
+    // Arrow keys move between tabs (WAI-ARIA tabs pattern).
+    b.addEventListener('keydown', (e) => {
+      const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!d) return;
+      e.preventDefault();
+      const next = (i + d + TABS.length) % TABS.length;
+      select_(next);
+      tabEls[next].focus();
+    });
     tabs.append(b);
     return b;
   });
   const select_ = (i: number) => {
     savePrefs({ settingsTab: i });
-    tabEls.forEach((b, k) => { b.classList.toggle('selected', k === i); b.setAttribute('aria-selected', String(k === i)); });
+    tabEls.forEach((b, k) => {
+      b.classList.toggle('selected', k === i);
+      b.setAttribute('aria-selected', String(k === i));
+      b.tabIndex = k === i ? 0 : -1;
+    });
     panelEls.forEach((p, k) => { p.hidden = k !== i; });
   };
   select_(Math.max(0, Math.min(2, prefs.settingsTab)));
@@ -271,7 +330,9 @@ export function sonarSettings(ctx: Ctx, ch: ChannelName, anchor: HTMLElement | n
       r.slider.classList.toggle('auto', auto);
     }
     rangeAuto.checked = cs.rangeAuto;
-    if (document.activeElement !== shallow && document.activeElement !== deep) fillRange(cs);
+    // Leave a list alone while it has focus (its popup may be open), but keep the other one in step.
+    const focused = document.activeElement === shallow ? 'shallow' : document.activeElement === deep ? 'deep' : null;
+    fillRange(cs.rangeShallowCm, cs.rangeDeepCm, focused === 'shallow' ? 'deep' : focused === 'deep' ? 'shallow' : undefined);
   };
   refresh(ctx.state());
   const unsub = ctx.onState(refresh);
@@ -348,8 +409,8 @@ export function mainSettings(ctx: Ctx): DialogHandle {
   row('Transducer depth', depthValue);
   row('Depth units', unitSel);
   row('Temperature units', tempSel);
-  // The app offers its simulator switch for the Wi-Fish; shown whenever the sonar reports the setting.
-  if (s?.system) {
+  // Like the app, the simulator switch is offered for the Wi-Fish only (MainSettingsFragment.h()).
+  if (s?.system && s.unit?.wifish) {
     row('Simulator', toggle(s.system.simulator, (v) => { ctx.sendSystem({ simulator: v }).catch(() => {}); }, 'Simulator'));
   }
   const unsub = ctx.onState(() => paintDepth());
@@ -379,12 +440,17 @@ export function transducerDepth(ctx: Ctx, onDone: () => void): DialogHandle {
   const below = h('input', { type: 'radio', name: 'td', id: 'td-below' });
   const above = h('input', { type: 'radio', name: 'td', id: 'td-above' });
   (off < 0 ? above : below).checked = true;
+  // Only a change the user made is sent: the lists round the stored offset to their steps,
+  // and writing that back on a plain open/close would move it.
+  let touched = false;
+  body.addEventListener('change', () => { touched = true; });
   body.append(row, h('div', { class: 'radios' },
     h('label', { for: 'td-below' }, below, ' Below waterline'),
     h('label', { for: 'td-above' }, above, ' Above keel')));
   return openDialog(body, {
     title: 'Transducer depth', modal: true, className: 'transducer-dialog',
     onClose: () => {
+      if (!touched) return;
       const cm = Math.min(300, read());
       const value = above.checked ? -cm : cm;
       if (value !== off) ctx.sendSystem({ transducerOffsetCm: value }).then(onDone, () => {});

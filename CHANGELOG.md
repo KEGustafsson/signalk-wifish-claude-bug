@@ -17,6 +17,15 @@
 - Built-in demo sonar and raw-capture replay for trying the app without hardware.
 - Protocol notes extended with the channel and system settings layouts, vertical
   scale of ping columns, low-voltage flag and software version.
+- Behaviour aligned with the Android app after a multi-agent review: keepalive
+  reports "connected" only after the unit id and all 32 ping configurations;
+  ping data and results pair in either order; depth readout held 6 s after a
+  lost bottom and refreshed at most once per second; range snapped to the depth
+  unit's presets and re-sent on a unit change; lost connection blanks depth and
+  temperature and returns to the connecting screen.
+- Hardening: JSON-only settings API (no cross-site form posts), capped event
+  streams with per-viewer buffer limits, stricter message validation,
+  incremental echogram rendering, keyboard and screen-reader support in dialogs.
 - Signal K plugin CI workflow; tests moved to vitest.
 
 ## 0.1.0

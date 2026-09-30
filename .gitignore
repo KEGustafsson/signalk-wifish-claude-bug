@@ -9,3 +9,4 @@ public/app.css.map
 *.pcapng
 *.apk
 .DS_Store
+*.tgz

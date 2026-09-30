@@ -53,7 +53,8 @@ button { font: inherit; color: inherit; }
 .trace-gear { position: absolute; left: 14px; top: 14px; width: 52px; height: 52px; border-radius: 50%;
   background: var(--bg-semi); border: 2px solid #fff; color: #fff; opacity: 0; pointer-events: none; transition: opacity .2s; }
 .trace-gear svg { width: 30px; height: 30px; }
-.trace-gear.shown { opacity: 1; pointer-events: auto; }
+.trace-gear:not(.shown) { visibility: hidden; transition: opacity .2s, visibility 0s .2s; }
+.trace-gear.shown, .trace-gear:focus-visible { opacity: 1; pointer-events: auto; visibility: visible; transition: opacity .2s; }
 
 .history-scroll { position: absolute; left: 12px; right: 70px; top: 10px; height: 34px; border-radius: 17px;
   background: #0009; border: 1px solid #fff5; z-index: 3; cursor: pointer; touch-action: none; }
@@ -95,6 +96,8 @@ button { font: inherit; color: inherit; }
 .dialog-layer.modal { background: #0008; display: grid; place-items: center; padding: 16px; }
 .dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 10px 40px #000a; max-width: calc(100vw - 16px); max-height: calc(100vh - 24px); overflow: auto; user-select: text; -webkit-user-select: text; touch-action: auto; }
 .dialog.anchored { position: fixed; overflow: visible; }
+/* The popover box keeps overflow visible for its arrow; its content scrolls on short screens. */
+.dialog.anchored > :not(.dialog-title) { max-height: inherit; overflow: auto; }
 .dialog.anchored::before { content: ""; position: absolute; top: -9px; left: calc(var(--arrow-x, 34px) - 9px); border: 9px solid transparent; border-top: 0; border-bottom-color: var(--border); }
 .dialog.anchored::after { content: ""; position: absolute; top: -8px; left: calc(var(--arrow-x, 34px) - 8px); border: 8px solid transparent; border-top: 0; border-bottom-color: var(--bg); }
 .dialog-title { font-size: 19px; font-weight: 600; padding: 16px 20px 6px; }

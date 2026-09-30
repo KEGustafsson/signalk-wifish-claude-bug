@@ -7,6 +7,8 @@ export const DISCOVERY = { group: '224.0.0.1', port: 5800 } as const;
 export const SERVICE_SONAR = 39;
 export const MAX_COLUMN = 1024;
 export const HEADER_LEN = 16;
+/** Ping configurations (channel settings indexes) the app waits for before reporting connected. */
+export const PING_CONFIGS = 32;
 
 export const MsgId = Object.freeze({
   ANNOUNCE: 0, UNIT: 1,
@@ -14,7 +16,7 @@ export const MsgId = Object.freeze({
   SYS_STATUS: 0x270103, ENV: 0x270104, SYS_SETTINGS: 0x270106,
   BOTTOM: 0x270108, PING_RESULTS: 0x27010b, ERROR: 0x27010d,
 });
-/** Messages that must be seen before keepalive byte 16 = 1 (§3.4). */
+/** Messages that must be seen before keepalive byte 16 = 1 (§3.4); also the unit id and all PING_CONFIGS channel settings. */
 export const REQUIRED: readonly number[] = Object.freeze([MsgId.ENV, MsgId.ERROR, MsgId.SYS_STATUS, MsgId.SYS_SETTINGS, MsgId.CHAN_SETTINGS]);
 
 /** Unit-type codes from discovery msg 1 (§2). */
@@ -45,7 +47,9 @@ export interface Header { id: number; length: number; version: number; seq: numb
 
 /** True when `b` is as long as both its header length field and the §5 minimum for its id. */
 export function isWellFormed(b: Uint8Array, h: Header): boolean {
-  return h.length >= HEADER_LEN && h.length <= b.length && b.length >= (MIN_LEN[h.id] ?? HEADER_LEN);
+  const min = MIN_LEN[h.id] ?? HEADER_LEN;
+  // Like the app, the header's own length must meet the minimum, not just the datagram.
+  return h.length >= min && h.length <= b.length;
 }
 
 const dv = (b: Uint8Array) => new DataView(b.buffer, b.byteOffset, b.byteLength);
@@ -219,7 +223,7 @@ export function parseChannelSettings(b: Uint8Array): ChannelSettings | null {
     seq: v.getInt32(CS.SEQ, true),
     index: b[CS.INDEX],
     name: cstr(b, CS.NAME, CS.NAME + 32),
-    enabled: b[CS.ENABLED] > 0,
+    enabled: b[CS.ENABLED] > 0 && b[CS.ENABLED] < 0x80, // the app reads it as a signed byte
     rangeAuto: b[CS.RANGE_AUTO] === 1,
     rangeShallowCm: v.getInt32(CS.RANGE_SHALLOW, true),
     rangeDeepCm: v.getInt32(CS.RANGE_DEEP, true),
@@ -227,14 +231,14 @@ export function parseChannelSettings(b: Uint8Array): ChannelSettings | null {
     contrast: b[CS.CONTRAST],
     gainAuto: b[CS.GAIN_AUTO] === 1,
     gain: b[CS.GAIN],
-    noiseFilterAuto: b[CS.NOISE_AUTO] > 0,
+    noiseFilterAuto: b[CS.NOISE_AUTO] > 0 && b[CS.NOISE_AUTO] < 0x80,
     noiseFilter: b[CS.NOISE],
   };
 }
 
 const pct = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
-/** Copy of a received 0x270102 with `patch` applied and seq set. Values are clamped like the app does. */
+/** Copy of a received 0x270102 with `patch` applied and seq set. Percentages are clamped to 0..100 (the app ignores values outside it). */
 export function buildChannelSettings(raw: Uint8Array, patch: ChannelSettingsPatch, seq: number): Uint8Array {
   if (raw.length < CHAN_SETTINGS_LEN) throw new Error('channel settings template too short');
   const b = Uint8Array.from(raw.subarray(0, CHAN_SETTINGS_LEN));
@@ -316,17 +320,20 @@ export interface Column {
 interface Partial_ { buf: Uint8Array; next: number; filled: number; t: number; dataType: number; setting: number }
 
 /**
- * Reassembles 0x270101 segments into columns, keyed by ping seq (u8).
- * Faithful to the app: a column starts at segment 0, any gap drops it,
- * it completes at segment == count-1. Adds bounds checks so a malformed
- * segment is dropped instead of throwing or allocating 4 GB, and expires
- * partial columns so a wrapped seq can't be glued onto a stale one.
- * `filled` in the result is the number of sample bytes received (== samples.length
- * when the segments covered the whole column).
+ * Reassembles 0x270101 segments into columns, keyed by ping seq (u8), and pairs
+ * each column with the ping results (0x27010B) of the same seq in either order:
+ * the app re-checks the pairing on both message types, so a column whose
+ * results come later is held (up to `staleMs`) instead of dropped.
+ * Faithful to the app: a column starts at segment 0, any gap drops it, it
+ * completes at segment == count-1, and its length is the bytes received.
+ * Adds bounds checks so a malformed segment is dropped instead of throwing or
+ * allocating 4 GB, and expires partial columns and old results so a wrapped
+ * seq can't be glued onto stale data.
  */
 export class PingAssembler {
   #pings = new Map<number, Partial_>();
-  #results = new Map<number, PingResults>();
+  #results = new Map<number, { r: PingResults; t: number }>();
+  #waiting = new Map<number, { col: Column; t: number }>();
   dropped = 0;
   readonly staleMs: number;
 
@@ -334,14 +341,24 @@ export class PingAssembler {
     this.staleMs = staleMs;
   }
 
-  /** Remember per-ping metadata (0x27010B) for pairing; keeps the last 32. */
-  addResults(r: PingResults | null): void {
-    if (!r) return;
+  /**
+   * Remember per-ping metadata for pairing (keeps the last 32). Returns the
+   * column of the same seq if it completed before its results arrived.
+   */
+  addResults(r: PingResults | null, now = Date.now()): Column | null {
+    if (!r) return null;
+    const w = this.#waiting.get(r.seq);
+    if (w) {
+      this.#waiting.delete(r.seq);
+      if (now - w.t <= this.staleMs) return { ...w.col, results: r };
+    }
     this.#results.delete(r.seq);
-    this.#results.set(r.seq, r);
+    this.#results.set(r.seq, { r, t: now });
     if (this.#results.size > 32) this.#results.delete(this.#results.keys().next().value!);
+    return null;
   }
 
+  /** Returns a complete column paired with its results, or null (incomplete, dropped, or waiting for results). */
   push(s: PingSegment | null, now = Date.now()): Column | null {
     if (!s) return null;
     if (s.error !== 0 || s.count === 0 || s.segment >= s.count
@@ -359,10 +376,20 @@ export class PingAssembler {
     p.next++;
     if (s.segment !== s.count - 1) return null;
     this.#pings.delete(s.seq);
-    return {
-      seq: s.seq, dataType: p.dataType, setting: p.setting, samples: p.buf, filled: p.filled,
-      results: this.#results.get(s.seq) ?? null,
+    const col: Column = {
+      seq: s.seq, dataType: p.dataType, setting: p.setting,
+      // The app scales the column over the bytes it received (e0.e.f()), not the announced total.
+      samples: p.filled >= p.buf.length ? p.buf : p.buf.subarray(0, p.filled),
+      filled: p.filled, results: null,
     };
+    const res = this.#results.get(s.seq);
+    if (res && now - res.t <= this.staleMs) {
+      this.#results.delete(s.seq);
+      return { ...col, results: res.r };
+    }
+    this.#waiting.set(s.seq, { col, t: now });
+    for (const [k, w] of this.#waiting) if (now - w.t > this.staleMs) this.#waiting.delete(k);
+    return null;
   }
 
   #drop(seq: number): null {

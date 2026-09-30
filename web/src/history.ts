@@ -21,7 +21,8 @@ function decode(b64: string): Uint8Array {
 
 export class ColumnStore {
   readonly cols: Col[] = [];
-  constructor(readonly channel: ChannelName, readonly max = 6000) {}
+  /** The app keeps 40 × 256 columns per channel (z.b). */
+  constructor(readonly channel: ChannelName, readonly max = 10_240) {}
 
   get first(): number { return this.cols.length ? this.cols[0].n : 0; }
   get last(): number { return this.cols.length ? this.cols[this.cols.length - 1].n : 0; }

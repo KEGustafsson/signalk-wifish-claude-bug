@@ -63,6 +63,61 @@ describe('Engine', () => {
     e.stop();
   });
 
+  test('rejects a range that would end up shallow >= deep, and a preset turns Auto range off', () => {
+    const t = new FakeTransport();
+    const e = new Engine(t);
+    e.start();
+    t.feed(channelSettings(0, 1, { deep: 2000 }));
+    t.feed(channelSettings(1, 1, { deep: 2000 }));
+    expect(e.setChannel('sonar', { rangeShallowCm: 2500 })).toMatch(/Shallow must be less than Deep/);
+    expect(t.sent).toHaveLength(0);
+    expect(e.setChannel('sonar', { rangeDeepCm: 3000 })).toBeNull();
+    expect(t.sent.map((b) => parseChannelSettings(b))).toEqual([
+      expect.objectContaining({ index: 0, rangeAuto: false, rangeDeepCm: 3000 }),
+      expect.objectContaining({ index: 1, rangeAuto: false, rangeDeepCm: 3000 }),
+    ]);
+    e.stop();
+  });
+
+  test('a new session forgets the old one; a lost link blanks depth and temperature', () => {
+    const t = new FakeTransport();
+    const deltas: Delta[] = [];
+    const e = new Engine(t, { onDelta: (d) => deltas.push(d) });
+    e.start();
+    t.feed(channelSettings(0, 5, { gain: 10 }));
+    t.feed(msg(MsgId.BOTTOM, 22, (b) => b.writeInt32LE(1000, 17)));
+    t.feed(msg(MsgId.ENV, 68, (b) => b.writeInt16LE(1234, 28)));
+    t.emit('link', 'lost', 'lost');
+    const values = deltas.flatMap((d) => d.updates[0].values);
+    expect(values).toContainEqual({ path: 'environment.depth.belowTransducer', value: null });
+    expect(values).toContainEqual({ path: 'environment.water.temperature', value: null });
+    expect(e.state()).toMatchObject({ depthCm: null, waterTempCentiC: null });
+    t.emit('link', 'connected', 'back');
+    expect(e.state().channels.sonar).not.toBeNull(); // recovered: settings kept
+    t.emit('link', 'connecting', 'new service');
+    expect(e.session.channelSettings(0)).toBeNull(); // a new session starts clean
+    t.feed(channelSettings(0, 1, { gain: 60 })); // a lower seq from a new unit is accepted
+    expect(e.session.channelSettings(0)!.gain).toBe(60);
+    e.stop();
+  });
+
+  test('the readout keeps the last depth for 6 s after bottom lock is lost', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'Date', 'performance'] });
+    const t = new FakeTransport();
+    const e = new Engine(t);
+    e.start();
+    const bottom = (cm: number) => t.feed(msg(MsgId.BOTTOM, 22, (b) => b.writeInt32LE(cm, 17)));
+    bottom(1000);
+    expect(e.state().depthCm).toBe(1000);
+    for (let i = 0; i < 5; i++) { vi.advanceTimersByTime(1000); bottom(-0x80000000); }
+    expect(e.state().depthCm).toBe(1000); // t = 5 s, first no-lock at t = 1 s
+    vi.advanceTimersByTime(2500); // t = 7.5 s > 1 s + 6 s
+    expect(e.state().depthCm).toBeNull();
+    bottom(-20);
+    expect(e.state().depthCm).toBe(0); // negative shows as 0, like the app
+    e.stop();
+  });
+
   test('can turn Signal K output off', () => {
     const t = new FakeTransport();
     const deltas: Delta[] = [];
@@ -79,6 +134,7 @@ describe('Engine', () => {
     const e = new Engine(t, { historyColumns: 3 });
     e.start();
     t.feed(systemSettings(1, 100));
+    t.feed(channelSettings(0, 1));
     t.feed(msg(MsgId.BOTTOM, 22, (b) => b.writeInt32LE(1100, 17)));
     for (let i = 0; i < 5; i++) {
       t.feed(results(i, 0, 0, 2000));
@@ -96,11 +152,9 @@ describe('Engine', () => {
     const t = new FakeTransport();
     const e = new Engine(t);
     e.start();
-    expect(e.setChannel('sonar', { gain: 10 })).toMatch(/No sonar data/);
+    expect(e.setChannel('sonar', { gain: 10 })).toMatch(/not received/);
     t.feed(channelSettings(0, 1));
-    t.feed(results(1, 0, 0, 1000));
-    t.feed(segment({ seq: 1, seg: 0, count: 1, total: 1, offset: 0, data: [1], setting: 0 }));
-    expect(e.setChannel('sonar', { gain: 10 })).toBeNull();
+    expect(e.setChannel('sonar', { gain: 10 })).toBeNull(); // default ping configuration 0, before any data
     expect(parseChannelSettings(t.sent[0])).toMatchObject({ gain: 10, seq: 2 });
     expect(e.setSystem({ simulator: true })).toMatch(/not received/);
     t.canSend = false;

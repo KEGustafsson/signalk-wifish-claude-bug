@@ -62,20 +62,23 @@ export function depthLinesFor(u: DepthUnit, rangeCm: number): number {
 
 export type TempUnit = 'C' | 'F';
 
-/** Tenths as the app shows them: "12.3" for 12.34 °C, "54.2" for °F. */
+/**
+ * Water temperature as the app shows it (SonarTraceActivity.d()): °C tenths are
+ * truncated, and °F is computed from that truncated °C and rounded to tenths.
+ */
 export function formatTemp(centiC: number | null, unit: TempUnit): { whole: string; frac: string; symbol: string } {
   const symbol = unit === 'C' ? '°C' : '°F';
   if (centiC === null) return { whole: '--', frac: '-', symbol: '--' };
-  let v = centiC / 100;
-  if (unit === 'F') v = (v * 9) / 5 + 32;
-  const t = Math.round(v * 10);
-  const sign = t < 0 ? '-' : '';
-  return { whole: sign + Math.floor(Math.abs(t) / 10), frac: String(Math.abs(t) % 10), symbol };
+  const tenthsC = Math.trunc(centiC / 10); // e.g. 1299 -> 129 (12.9 °C)
+  const tenths = unit === 'C' ? tenthsC : Math.round(((tenthsC / 10) * 9 / 5 + 32) * 10);
+  const sign = tenths < 0 ? '-' : '';
+  const a = Math.abs(tenths);
+  return { whole: sign + Math.floor(a / 10), frac: String(a % 10), symbol };
 }
 
-/** Depth with one decimal, truncated like the app ("%d.%d"). */
+/** Depth with one decimal, truncated like the app ("%d.%d"); negative depths show as 0.0 like the app. */
 export function formatDepth(cm: number | null, u: DepthUnit): { whole: string; frac: string; symbol: string } {
-  if (cm === null || cm < 0) return { whole: '--', frac: '-', symbol: u.symbol };
-  const hundredths = Math.trunc((cm / u.cm) * 100);
+  if (cm === null || !Number.isFinite(cm)) return { whole: '--', frac: '-', symbol: u.symbol };
+  const hundredths = Math.trunc((Math.max(0, cm) / u.cm) * 100);
   return { whole: String(Math.trunc(hundredths / 100)), frac: String(Math.trunc((hundredths % 100) / 10)), symbol: u.symbol };
 }

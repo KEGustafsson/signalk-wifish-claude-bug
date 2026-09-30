@@ -7,7 +7,7 @@
 
 import { lut } from './palettes';
 import type { ColumnStore, Col } from './history';
-import { depthLinesFor, type DepthUnit } from '../../src/shared/units';
+import { depthLinesFor, snapToPreset, type DepthUnit } from '../../src/shared/units';
 import type { ChannelName } from '../../src/shared/api';
 
 const ZOOM_BOX = 0.15;
@@ -48,6 +48,11 @@ export class TraceView {
   trackBottom = true;
   #anim: { from: Window; to: Window; t0: number } | null = null;
   #lastTrackY = -1e9;
+  /** Full range last drawn; a change resets the zoom like the app (SonarTraceView.h()). */
+  #lastFull = '';
+  /** What the echo canvas currently shows, for incremental scrolling. */
+  #shown: { W: number; H: number; mainW: number; zbW: number; colW: number; right: number; top: number; bottom: number; palette: number } | null = null;
+  #colBuf = new Uint32Array(0);
 
   constructor(channel: ChannelName, store: ColumnStore, label: string) {
     this.channel = channel;
@@ -65,6 +70,13 @@ export class TraceView {
     this.gear.setAttribute('aria-label', `${label} settings`);
     this.el.append(this.#img, this.#ov, this.gear);
     new ResizeObserver(() => this.#resize()).observe(this.el);
+    this.#watchDpr();
+  }
+
+  /** Re-render crisp text when the window moves to a screen with another pixel ratio. */
+  #watchDpr(): void {
+    const mq = window.matchMedia?.(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    mq?.addEventListener?.('change', () => { this.#resize(); this.#watchDpr(); }, { once: true });
   }
 
   get visible(): boolean { return this.el.offsetParent !== null && this.#cssW > 0; }
@@ -114,7 +126,11 @@ export class TraceView {
 
   fullWindow(): Window {
     const c = this.refColumn();
-    return c ? { top: c.startCm, bottom: c.endCm } : { top: 0, bottom: 1000 };
+    if (!c) return { top: 0, bottom: 1000 };
+    // Like the app (z.b.h()), the window is the ping's range snapped to the unit's presets.
+    const top = this.unit ? snapToPreset(this.unit, c.startCm) : c.startCm;
+    const bottom = this.unit ? snapToPreset(this.unit, c.endCm) : c.endCm;
+    return bottom > top ? { top, bottom } : { top: c.startCm, bottom: c.endCm };
   }
 
   window(): Window {
@@ -123,18 +139,25 @@ export class TraceView {
 
   /** Column number under CSS x, and depth (cm below transducer) under CSS y. */
   pick(x: number, y: number): { col: Col | undefined; depthCm: number } {
-    const n = this.right - Math.floor((this.layout().main - 1 - x) / this.speed);
-    const w = this.window();
+    const L = this.layout();
+    const inMain = x < L.main;
+    // Zoom box (1 px per column) and A-scope show the full range.
+    const n = inMain
+      ? this.right - Math.floor((L.main - 1 - x) / this.speed)
+      : x < L.main + L.zoomBox ? this.right - Math.floor(L.main + L.zoomBox - 1 - x) : this.right;
+    const w = inMain ? this.window() : this.fullWindow();
     return { col: this.store.get(n), depthCm: w.top + (y / this.#cssH) * (w.bottom - w.top) };
   }
 
   // ---------------------------------------------------------------- view changes
 
   scrollBy(cols: number): void {
-    const last = this.store.last;
-    const first = this.store.first + Math.min(this.visibleColumns(), Math.max(0, last - this.store.first)) - 1;
+    if (!this.store.cols.length) return; // nothing to scroll through yet
+    const first = this.store.first, last = this.store.last;
+    // Oldest right edge that still fills the screen (or shows all of a short history).
+    const minRight = first + Math.min(this.visibleColumns(), last - first + 1) - 1;
     const next = Math.round(this.right + cols);
-    this.endN = next >= last ? null : Math.max(first, next);
+    this.endN = next >= last ? null : Math.max(minRight, next);
     this.#dirty = true;
   }
 
@@ -225,7 +248,11 @@ export class TraceView {
     if (Math.abs(y - this.#lastTrackY) <= RETRACK_PX && y > 0 && y < this.#cssH) return;
     const target = this.#clamp({ top: b - BOTTOM_AT * h, bottom: b - BOTTOM_AT * h + h });
     if (!target) return;
-    this.#lastTrackY = ((b - target.top) / h) * this.#cssH;
+    const ty = ((b - target.top) / h) * this.#cssH;
+    // The range limits keep the bottom out of view: stop following instead of retrying every frame.
+    if (ty < 0 || ty > this.#cssH) { this.trackBottom = false; return; }
+    this.#lastTrackY = ty;
+    if (this.#anim && Math.abs(this.#anim.to.top - target.top) < 0.5) return; // already heading there
     this.#anim = { from: { ...this.zoom }, to: target, t0: now };
   }
 
@@ -234,6 +261,13 @@ export class TraceView {
   /** Draw if something changed. Returns true when it drew. */
   draw(now: number): boolean {
     if (!this.visible) return false;
+    const full = this.fullWindow();
+    const fullKey = `${full.top}:${full.bottom}`;
+    if (fullKey !== this.#lastFull) {
+      if (this.#lastFull && this.zoom) this.resetZoom(); // new range: the old zoom may lie outside it
+      this.#lastFull = fullKey;
+      this.#dirty = true;
+    }
     this.#followBottom(now);
     if (this.#anim) {
       const k = Math.min(1, (now - this.#anim.t0) / 500);
@@ -255,6 +289,7 @@ export class TraceView {
     if (!this.#image || this.#image.width !== W || this.#image.height !== H) {
       this.#image = new ImageData(W, H);
       this.#pix = new Uint32Array(this.#image.data.buffer);
+      this.#shown = null;
     }
     const pix = this.#pix!;
     const pal = lut(this.palette);
@@ -262,17 +297,31 @@ export class TraceView {
     const L = this.layout();
     const mainW = Math.round(L.main * rs);
     const zbW = Math.round(L.zoomBox * rs);
+    const colW = this.speed * rs;
+    const right = this.right;
     const w = this.window();
-    this.#columns(pix, W, H, 0, mainW, this.speed * rs, this.right, w, pal);
-    if (zbW > 0) this.#columns(pix, W, H, mainW, mainW + zbW, rs, this.right, this.fullWindow(), pal);
-    if (L.aScope > 0) this.#aScope(pix, W, H, mainW + zbW, W, w, pal);
-    this.#img.getContext('2d')!.putImageData(this.#image, 0, 0);
+    const ctx = this.#img.getContext('2d')!;
+    // Live scrolling with nothing else changed: move the picture left and draw only the new pings.
+    const prev = this.#shown;
+    const shift = prev ? (right - prev.right) * colW : 0;
+    const incremental = !!prev && prev.W === W && prev.H === H && prev.mainW === mainW && prev.zbW === zbW
+      && prev.colW === colW && prev.top === w.top && prev.bottom === w.bottom && prev.palette === this.palette
+      && shift > 0 && shift < mainW && Number.isInteger(shift);
+    const from = incremental ? mainW - shift : 0;
+    if (incremental) ctx.drawImage(this.#img, shift, 0, mainW - shift, H, 0, 0, mainW - shift, H);
+    this.#columns(pix, W, H, from, mainW, colW, right, w, pal);
+    if (zbW > 0) this.#columns(pix, W, H, mainW, mainW + zbW, rs, right, this.fullWindow(), pal);
+    if (L.aScope > 0) this.#aScope(pix, W, H, mainW + zbW, W, this.fullWindow(), pal);
+    if (incremental) ctx.putImageData(this.#image, 0, 0, from, 0, W - from, H);
+    else ctx.putImageData(this.#image, 0, 0);
+    this.#shown = { W, H, mainW, zbW, colW, right, top: w.top, bottom: w.bottom, palette: this.palette };
   }
 
-  /** Fill pixel columns [x0, x1) with pings ending at column `right`, `colW` px each. */
+  /** Fill pixel columns [x0, x1) with pings ending at column `right` at x1, `colW` px each. */
   #columns(pix: Uint32Array, W: number, H: number, x0: number, x1: number, colW: number, right: number, win: Window, pal: Uint32Array): void {
     const bg = pal[0];
-    const buf = new Uint32Array(H);
+    if (this.#colBuf.length !== H) this.#colBuf = new Uint32Array(H);
+    const buf = this.#colBuf;
     const span = win.bottom - win.top;
     let lastN = NaN;
     let have = false;
@@ -281,12 +330,11 @@ export class TraceView {
       if (n !== lastN) {
         lastN = n;
         const c = this.store.get(n);
-        have = !!c;
-        if (c) {
+        have = !!c && c.endCm > 0;
+        if (c && have) {
           const s = c.samples, len = s.length, k = len / c.endCm;
           for (let y = 0; y < H; y++) {
-            const z = win.top + ((y + 0.5) / H) * span;
-            const i = Math.floor(z * k);
+            const i = Math.floor((win.top + ((y + 0.5) / H) * span) * k);
             buf[y] = i >= 0 && i < len ? pal[s[i]] : bg;
           }
         }
@@ -314,10 +362,10 @@ export class TraceView {
     }
   }
 
-  #label(cm: number, step: number): string {
-    const v = (cm + this.offsetCm) / this.unit.cm;
-    const decimals = step >= 1 - 1e-9 ? 0 : 1;
-    return v.toFixed(decimals);
+  /** Decimals needed to show multiples of `step` exactly (1, 0.5, 0.25 ...). */
+  static #decimals(step: number): number {
+    for (let d = 0; d < 3; d++) if (Math.abs(step * 10 ** d - Math.round(step * 10 ** d)) < 1e-6) return d;
+    return 2;
   }
 
   #drawOverlay(): void {
@@ -359,43 +407,46 @@ export class TraceView {
     }
   }
 
-  /** Depth scale along the right edge `xr` for window `w` (app: DepthRulerView). */
+  /**
+   * Depth scale along the right edge `xr` for window `w` (app: DepthRulerView).
+   * Marks sit on round *displayed* depths, i.e. with the transducer offset added.
+   */
   #ruler(ctx: CanvasRenderingContext2D, xr: number, H: number, w: Window, main: boolean): void {
     const u = this.unit;
     const spanCm = w.bottom - w.top;
     if (!(spanCm > 0)) return;
-    const spanU = spanCm / u.cm;
-    // Preset ranges get the app's line counts; zoomed windows a "nice" step.
+    const off = this.offsetCm;
+    const topU = (w.top + off) / u.cm;
+    const bottomU = (w.bottom + off) / u.cm;
+    const spanU = bottomU - topU;
+    // A preset range from the surface gets the app's line count; anything else a "nice" step.
+    const lines = w.top === 0 && off === 0 ? depthLinesFor(u, Math.round(spanCm)) : -1;
     let step: number;
-    const lines = w.top === 0 ? depthLinesFor(u, Math.round(spanCm)) : -1;
     if (lines > 0) step = spanU / (lines + 1);
     else {
       const raw = spanU / 4.5;
       const p = 10 ** Math.floor(Math.log10(raw));
-      step = [1, 2, 2.5, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? 10 * p;
+      step = [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? 10 * p;
     }
-    const y = (cm: number) => ((cm - w.top) / spanCm) * H;
+    const dec = TraceView.#decimals(step);
+    const y = (vU: number) => ((vU - topU) / spanU) * H;
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.9)';
     ctx.shadowBlur = 2;
     ctx.fillStyle = '#fff';
     ctx.strokeStyle = '#fff';
     ctx.textAlign = 'right';
-    // right edge line
-    ctx.fillRect(xr - 2, 0, 2, H);
+    ctx.fillRect(xr - 2, 0, 2, H); // right edge line
     const small = 8, big = 14, pad = 4;
-    const fontSmall = '600 13px system-ui, sans-serif';
-    const fontBig = '700 16px system-ui, sans-serif';
-    // intermediate marks
-    const firstU = Math.ceil((w.top / u.cm) / step - 1e-6) * step;
-    ctx.font = fontSmall;
+    ctx.font = '600 13px system-ui, sans-serif';
     ctx.textBaseline = 'middle';
-    for (let v = firstU; v * u.cm < w.bottom - 1e-6; v += step) {
-      const cm = v * u.cm;
-      const yy = y(cm);
+    const first = Math.ceil(topU / step - 1e-6);
+    for (let i = first; i * step < bottomU - 1e-6; i++) {
+      const v = i * step;
+      const yy = y(v);
       if (yy < 18 || yy > H - 18) continue;
       ctx.fillRect(xr - small, Math.round(yy) - 1, small, 2);
-      ctx.fillText(this.#label(cm, step), xr - small - pad, yy);
+      ctx.fillText(v.toFixed(dec), xr - small - pad, yy);
       if (main && this.depthLines) {
         ctx.save();
         ctx.shadowBlur = 0;
@@ -409,14 +460,15 @@ export class TraceView {
         ctx.restore();
       }
     }
-    // range start / end in the big font
-    ctx.font = fontBig;
+    // Window top / bottom in the big font, with a decimal unless they are whole.
+    const edge = (v: number) => v.toFixed(Math.abs(v - Math.round(v)) < 0.05 ? 0 : 1);
+    ctx.font = '700 16px system-ui, sans-serif';
     ctx.fillRect(xr - big, 0, big, 2);
     ctx.fillRect(xr - big, H - 2, big, 2);
     ctx.textBaseline = 'top';
-    ctx.fillText(this.#label(w.top, step), xr - big - pad, 3);
+    ctx.fillText(edge(topU), xr - big - pad, 3);
     ctx.textBaseline = 'bottom';
-    ctx.fillText(this.#label(w.bottom, step), xr - big - pad, H - 3);
+    ctx.fillText(edge(bottomU), xr - big - pad, H - 3);
     ctx.restore();
   }
 

@@ -13,6 +13,7 @@ describe('Sonar4Session', () => {
   test('pairs a column with its ping results and uses the auto range', () => {
     const s = new Sonar4Session();
     const cols = columns(s);
+    s.handle(channelSettings(7, 1));
     s.handle(results(4, 1, 100, 1500));
     s.handle(segment({ seq: 4, seg: 0, count: 1, total: 3, offset: 0, data: [1, 2, 3], setting: 7 }));
     expect(cols).toHaveLength(1);
@@ -29,14 +30,53 @@ describe('Sonar4Session', () => {
     expect(cols[0]).toMatchObject({ channel: 0, startCm: 200, endCm: 900 });
   });
 
-  test('skips columns of a configuration held as disabled, and columns without results', () => {
+  test('skips columns of a configuration held as disabled or never received, and columns without results', () => {
     const s = new Sonar4Session();
     const cols = columns(s);
     s.handle(channelSettings(7, 1, { enabled: 0 }));
+    s.handle(channelSettings(1, 1));
     s.handle(results(4, 0, 0, 1500));
     s.handle(segment({ seq: 4, seg: 0, count: 1, total: 2, offset: 0, data: [1, 2], setting: 7 }));
     s.handle(segment({ seq: 5, seg: 0, count: 1, total: 2, offset: 0, data: [1, 2], setting: 1 }));
+    s.handle(results(6, 0, 0, 1500));
+    s.handle(segment({ seq: 6, seg: 0, count: 1, total: 2, offset: 0, data: [1, 2], setting: 20 }));
     expect(cols).toHaveLength(0);
+  });
+
+  test('emits a column when its results come after the data', () => {
+    const s = new Sonar4Session();
+    const cols = columns(s);
+    s.handle(channelSettings(0, 1));
+    s.handle(segment({ seq: 3, seg: 0, count: 1, total: 2, offset: 0, data: [1, 2], setting: 0 }));
+    expect(cols).toHaveLength(0);
+    s.handle(results(3, 0, 0, 800));
+    expect(cols).toHaveLength(1);
+    expect(cols[0]).toMatchObject({ channel: 0, endCm: 800 });
+  });
+
+  test('reset forgets results, unit and readings from the previous connection', () => {
+    const s = new Sonar4Session();
+    const cols = columns(s);
+    const unit = Buffer.alloc(52); unit.writeUInt32LE(1, 0); unit.writeUInt32LE(67, 4);
+    s.handle(unit);
+    s.handle(msg(MsgId.ENV, 68, (b) => b.writeInt16LE(1530, 28)));
+    s.handle(results(1, 1, 0, 5000));
+    s.reset();
+    expect(s.unit).toBeNull();
+    expect(s.waterTempCentiC).toBeNull();
+    s.handle(channelSettings(0, 1));
+    s.handle(segment({ seq: 1, seg: 0, count: 1, total: 1, offset: 0, data: [1], setting: 0 }));
+    expect(cols).toHaveLength(0); // the old results must not be reused
+  });
+
+  test('uses the app default ping configurations before any data', () => {
+    const s = new Sonar4Session();
+    s.handle(channelSettings(0, 4));
+    s.handle(channelSettings(1, 8));
+    expect(s.indexFor(0)).toBe(0);
+    expect(s.indexFor(1)).toBe(1);
+    const out = s.buildChannelCommands(1, { gain: 70 });
+    expect(parseChannelSettings(out[0])).toMatchObject({ index: 1, gain: 70, seq: 9 });
   });
 
   test('ignores a wrong protocol version and malformed messages', () => {
@@ -49,14 +89,19 @@ describe('Sonar4Session', () => {
     expect(warns).toHaveLength(2);
   });
 
-  test('is ready once every required message was seen', () => {
+  test('is ready once the unit, every required message and all 32 ping configurations were seen', () => {
     const s = new Sonar4Session();
+    const unit = Buffer.alloc(52); unit.writeUInt32LE(1, 0); unit.writeUInt32LE(67, 4);
     s.handle(msg(MsgId.ENV, 68));
     s.handle(msg(MsgId.ERROR, 20));
     s.handle(msg(MsgId.SYS_STATUS, 1063));
     s.handle(systemSettings(1));
+    for (let i = 0; i < 31; i++) s.handle(channelSettings(i, 1));
+    s.handle(unit);
     expect(s.ready).toBe(false);
-    s.handle(channelSettings(0, 1));
+    s.handle(channelSettings(40, 1)); // rejected: index out of range
+    expect(s.ready).toBe(false);
+    s.handle(channelSettings(31, 1));
     expect(s.ready).toBe(true);
     s.reset();
     expect(s.ready).toBe(false);

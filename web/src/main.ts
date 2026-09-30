@@ -9,7 +9,7 @@ import {
   aboutDialog, closeAll, helpDialog, mainSettings, messageBox, overflowMenu, sonarSettings, viewSwitcher,
   type Ctx, type DialogHandle,
 } from './dialogs';
-import { formatDepth, formatTemp, unitByCode, unitById, type DepthUnit } from '../../src/shared/units';
+import { formatDepth, formatTemp, snapToPreset, unitByCode, unitById, type DepthUnit } from '../../src/shared/units';
 import type { ChannelName, WifishState } from '../../src/shared/api';
 
 declare const __VERSION__: string;
@@ -68,8 +68,27 @@ function applyView(): void {
   for (const t of Object.values(traces)) t.invalidate();
 }
 
+let appliedUnit: string | null = null;
+/**
+ * When the depth unit changes the app snaps the sonar's shallow/deep range to the new
+ * unit's presets and sends it to both channels (SonarTraceActivity.i.a()).
+ */
+function unitChanged(u: DepthUnit): void {
+  const prev = appliedUnit;
+  appliedUnit = u.id;
+  if (prev === null || prev === u.id || !state?.canControl) return;
+  const ch: ChannelName = isWifish() ? 'downvision' : 'sonar';
+  const cs = state.channels[ch];
+  if (!cs) return;
+  const shallow = snapToPreset(u, cs.rangeShallowCm);
+  const deep = snapToPreset(u, cs.rangeDeepCm);
+  if ((shallow === cs.rangeShallowCm && deep === cs.rangeDeepCm) || deep <= shallow) return;
+  ctx.sendChannel(ch, { rangeAuto: cs.rangeAuto, rangeShallowCm: shallow, rangeDeepCm: deep }).catch(() => {});
+}
+
 function applyPrefs(): void {
   const u = depthUnit();
+  if (state) unitChanged(u);
   const offset = state?.system?.transducerOffsetCm ?? 0;
   traces.sonar.palette = prefs.paletteSonar;
   traces.downvision.palette = prefs.paletteDownvision;
@@ -168,6 +187,17 @@ let longPress: number | undefined;
 let downAt = 0;
 let lastTap = 0;
 let colCarry = 0;
+let wheelCarry = 0;
+/** Sideways drag has started scrolling history (live traces need a clear sideways move first). */
+let hScroll = false;
+
+/** Same local y in every trace for a zoom centred at clientY (the app maps the focus once). */
+function zoomAll(factor: number, clientX: number, clientY: number): void {
+  const t = traceAt(clientX, clientY);
+  const localY = t ? clientY - t.el.getBoundingClientRect().top : undefined;
+  // While following the bottom the app zooms around it (scale to bottom), otherwise around the focus.
+  for (const tr of shownTraces()) tr.zoomBy(factor, tr.trackBottom ? undefined : localY);
+}
 
 function traceAt(x: number, y: number): TraceView | null {
   for (const t of Object.values(traces)) {
@@ -187,6 +217,7 @@ tracesEl.addEventListener('pointerdown', (e) => {
     gesture = 'tap';
     downAt = performance.now();
     colCarry = 0;
+    hScroll = false;
     window.clearTimeout(longPress);
     longPress = window.setTimeout(() => {
       if (gesture === 'tap') { gesture = 'none'; showDetails(e.clientX, e.clientY); }
@@ -208,9 +239,17 @@ tracesEl.addEventListener('pointermove', (e) => {
   if (gesture === 'drag') {
     // Horizontal: history (both traces together, like the app). Vertical: pan when zoomed.
     const speed = traces.sonar.speed;
-    colCarry += -dx / speed;
+    if (!hScroll) {
+      // A live trace only starts scrolling on a clearly sideways move of 8+ columns (app: a.g()),
+      // so a vertical pan with a little drift doesn't pause it.
+      const ox = p.x - p.x0, oy = p.y - p.y0;
+      hScroll = !paused() ? Math.abs(ox) >= 8 * speed && Math.abs(ox) > Math.abs(oy) : true;
+      if (hScroll) colCarry = paused() ? 0 : -ox / speed;
+    } else {
+      colCarry += -dx / speed;
+    }
     const whole = Math.trunc(colCarry);
-    if (whole) {
+    if (hScroll && whole) {
       colCarry -= whole;
       for (const t of Object.values(traces)) t.scrollBy(whole);
       paintPause();
@@ -223,13 +262,12 @@ tracesEl.addEventListener('pointermove', (e) => {
       // vertical pinch: zoom the water column
       const f = Math.max(0.2, sy) / Math.max(1, pinch0.dy);
       if (Math.abs(f - 1) > 0.02) {
-        const cy = (a.y + b.y) / 2;
-        for (const t of shownTraces()) t.zoomBy(f, cy - t.el.getBoundingClientRect().top);
+        zoomAll(f, (a.x + b.x) / 2, (a.y + b.y) / 2);
         pinch0.dy = sy;
       }
     } else {
       const s = Math.max(1, Math.min(5, pinch0.speed * (sx / Math.max(1, pinch0.dx))));
-      savePrefs({ speed: s });
+      prefs.speed = s; // saved when the pinch ends
       for (const t of Object.values(traces)) t.setSpeed(s);
     }
   }
@@ -253,6 +291,7 @@ function pointerEnd(e: PointerEvent): void {
   }
   if (pointers.size === 0) {
     for (const t of Object.values(traces)) t.endGesture();
+    if (gesture === 'pinch') savePrefs({ speed: prefs.speed });
     gesture = 'none';
     pinch0 = null;
   }
@@ -262,11 +301,9 @@ tracesEl.addEventListener('pointercancel', pointerEnd);
 
 tracesEl.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const t = traceAt(e.clientX, e.clientY);
   if (e.ctrlKey && !e.deltaX && Math.abs(e.deltaY) < 20 && !e.altKey) {
     // trackpad pinch arrives as ctrl+wheel with small deltas: zoom
-    const f = Math.exp(-e.deltaY / 100);
-    for (const tr of shownTraces()) tr.zoomBy(f, t ? e.clientY - tr.el.getBoundingClientRect().top : undefined);
+    zoomAll(Math.exp(-e.deltaY / 100), e.clientX, e.clientY);
     return;
   }
   if (e.ctrlKey || e.altKey) {
@@ -277,12 +314,17 @@ tracesEl.addEventListener('wheel', (e) => {
   }
   const horiz = e.shiftKey ? e.deltaY : e.deltaX;
   if (Math.abs(horiz) > Math.abs(e.shiftKey ? 0 : e.deltaY)) {
-    for (const tr of Object.values(traces)) tr.scrollBy(horiz / tr.speed);
-    paintPause();
+    // Keep the fraction, so slow trackpad scrolling still moves.
+    wheelCarry += horiz / traces.sonar.speed;
+    const whole = Math.trunc(wheelCarry);
+    if (whole) {
+      wheelCarry -= whole;
+      for (const tr of Object.values(traces)) tr.scrollBy(whole);
+      paintPause();
+    }
     return;
   }
-  const f = Math.exp(-e.deltaY / 500);
-  for (const tr of shownTraces()) tr.zoomBy(f, e.clientY - tr.el.getBoundingClientRect().top);
+  zoomAll(Math.exp(-e.deltaY / 500), e.clientX, e.clientY);
   for (const tr of shownTraces()) tr.endGesture();
 }, { passive: false });
 
@@ -301,8 +343,12 @@ function showDetails(x: number, y: number): void {
   const temp = formatTemp(col.tempCentiC, prefs.tempUnit);
   const ago = Math.max(0, Math.round((Date.now() - col.t) / 1000));
   const when = ago < 60 ? `${ago} s ago` : ago < 3600 ? `${Math.floor(ago / 60)} min ${ago % 60} s ago` : new Date(col.t).toLocaleTimeString();
+  // Like the app's trace point details, the picture holds still while they are shown.
+  const wasPaused = paused();
+  if (!wasPaused) setPaused(true);
   messageBox(t.channel === 'sonar' ? 'Sonar' : 'DownVision',
-    `Depth at point: ${d.whole}.${d.frac} ${d.symbol}\nBottom: ${b.whole}.${b.frac} ${b.symbol}\nWater: ${temp.whole}.${temp.frac} ${temp.symbol}\nTime: ${new Date(col.t).toLocaleTimeString()} (${when})`);
+    `Depth at point: ${d.whole}.${d.frac} ${d.symbol}\nBottom: ${b.whole}.${b.frac} ${b.symbol}\nWater: ${temp.whole}.${temp.frac} ${temp.symbol}\nTime: ${new Date(col.t).toLocaleTimeString()} (${when})`,
+    [{ label: 'OK' }], { onClose: () => { if (!wasPaused) setPaused(false); } });
 }
 
 // ------------------------------------------------------------------ history scrollbar (app: HistoryScrollbarView)
@@ -389,27 +435,44 @@ btnSnapshot.addEventListener('click', () => {
 
 // ------------------------------------------------------------------ databox, status
 
+let depthShownAt = 0;
+let depthTimer: number | undefined;
 function paintDatabox(): void {
-  const d = formatDepth(state?.depthCm ?? null, depthUnit());
-  $('depth').textContent = `${d.whole}.`;
-  $('depth-frac').textContent = d.frac;
-  $('depth-unit').textContent = d.symbol;
+  // The app refreshes the depth readout at most once per second.
+  const now = performance.now();
+  const wait = 1000 - (now - depthShownAt);
+  if (wait > 0) {
+    if (depthTimer === undefined) depthTimer = window.setTimeout(() => { depthTimer = undefined; paintDatabox(); }, wait);
+  } else {
+    depthShownAt = now;
+    paintDepth();
+  }
   const t = formatTemp(state?.waterTempCentiC ?? null, prefs.tempUnit);
   $('temp').textContent = `${t.whole}.`;
   $('temp-frac').textContent = t.frac;
   $('temp-unit').textContent = t.symbol;
 }
+function paintDepth(): void {
+  const d = formatDepth(state?.depthCm ?? null, depthUnit());
+  $('depth').textContent = `${d.whole}.`;
+  $('depth-frac').textContent = d.frac;
+  $('depth-unit').textContent = d.symbol;
+}
 
 let lostDialog: DialogHandle | null = null;
 let lowVoltDialog: DialogHandle | null = null;
 let lowVoltShown = false;
+/** "Lost connection" is shown once per episode, even if dismissed. */
+let lostShown = false;
 let offlineTimer: number | undefined;
 let streamOk = true;
 
 function paintConnection(): void {
   const s = state;
   const anyData = stores.sonar.cols.length + stores.downvision.cols.length > 0;
-  const showConnecting = !s || !streamOk || (!anyData && s.link !== 'connected') || (s.link !== 'connected' && s.link !== 'lost' && !anyData);
+  // Like the app returning to its connecting screen: shown whenever no sonar session runs,
+  // even if old pictures are still in memory.
+  const showConnecting = !s || !streamOk || s.link === 'searching' || s.link === 'offline' || (!anyData && s.link !== 'connected');
   const conn = $('connecting');
   conn.hidden = !showConnecting;
   $('connect-msg').textContent = !streamOk ? 'Connecting to Signal K…' : s ? s.message : 'Plugin not running';
@@ -433,10 +496,12 @@ function paintConnection(): void {
   ls.textContent = s && s.source !== 'device' ? (s.source === 'demo' ? 'DEMO' : 'REPLAY') : '';
 
   // Lost connection (app: DisconnectFragment).
-  if (s?.link === 'lost' && !lostDialog) {
+  if (s?.link === 'lost' && !lostShown) {
+    lostShown = true;
     lostDialog = messageBox('Lost connection', 'Trying to restore connection to the sounder…', [{ label: 'Dismiss' }], { onClose: () => { lostDialog = null; } });
-  } else if (s?.link !== 'lost' && lostDialog) {
-    lostDialog.close();
+  } else if (s?.link !== 'lost') {
+    lostShown = false;
+    lostDialog?.close();
   }
   // Low voltage (app: LowVoltageFragment); shown once per episode.
   if (s?.lowVoltage && !lowVoltShown) {
@@ -454,19 +519,19 @@ $('btn-retry').addEventListener('click', () => {
   stream.open();
 });
 
-// Simulated-data label blinks every 2 s (app: sim_blink).
+// Simulated-data label blinks every 2 s (app: sim_blink, msg 108).
 window.setInterval(() => {
   const el = $('sim-blink');
   if (state?.system?.simulator) el.hidden = !el.hidden;
   else el.hidden = true;
-}, 1000);
+}, 2000);
 
 function onState(s: WifishState | null): void {
   const prevWifish = isWifish();
   state = s;
   btnSettings.hidden = !isWifish();
   btnViews.hidden = isWifish();
-  if (prevWifish !== isWifish()) applyView();
+  if (prevWifish !== isWifish()) hideGears();
   applyView();
   applyPrefs();
   paintConnection();
@@ -491,7 +556,12 @@ const ctx: Ctx = {
 let toastTimer: number | undefined;
 function toast(msg: string): void {
   let el = document.querySelector<HTMLDivElement>('.toast');
-  if (!el) { el = document.createElement('div'); el.className = 'toast'; document.body.append(el); }
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'toast';
+    el.setAttribute('role', 'status');
+    document.body.append(el);
+  }
   el.textContent = msg;
   el.classList.add('shown');
   window.clearTimeout(toastTimer);

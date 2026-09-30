@@ -79,12 +79,12 @@ Palettes, units, view and similar preferences are stored per browser.
 
 ## Development
 
-Node.js 20+.
+Node.js 20+ to run the plugin; development tools (vite/vitest) need Node 20.19+ or 22.12+.
 
 ```sh
 npm install          # also builds
 npm test             # vitest
-npm run dev          # web app with the demo sonar on http://localhost:3000/
+npm run dev          # web app with the demo sonar on http://localhost:3000/ (listens on 127.0.0.1; add --host 0.0.0.0 to share it)
 node dist/devserver.js --demo --wifish            # Wi-Fish (DownVision only)
 node dist/devserver.js --device [--iface 192.168.x.y] [--passive] [--deltas]
 node dist/devserver.js --replay capture.bin

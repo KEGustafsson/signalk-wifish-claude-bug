@@ -3,7 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { plugin } from '../src/plugin';
 import { EventEmitter } from 'node:events';
-import { Api, MAX_UNREAD_BYTES, parseChannelPatch, parseSystemPatch } from '../src/api';
+import { Api, MAX_STREAMS, MAX_UNREAD_BYTES, parseChannelPatch, parseSystemPatch } from '../src/api';
 import type { Engine } from '../src/engine';
 import type { Delta } from '../src/signalk';
 
@@ -67,9 +67,15 @@ describe('plugin HTTP API (demo source)', () => {
     expect(r.status).toBe(200);
     expect((await r.json()).channels.sonar).toMatchObject({ gain: 77, gainAuto: false });
 
-    const bad = await fetch(`${base}/api/channel/sonar`, { method: 'POST', body: '{"gain":900}' });
+    const json = { 'content-type': 'application/json' };
+    const bad = await fetch(`${base}/api/channel/sonar`, { method: 'POST', headers: json, body: '{"gain":900}' });
     expect(bad.status).toBe(400);
-    const sys = await fetch(`${base}/api/system`, { method: 'POST', body: '{"simulator":true}' });
+    const garbled = await fetch(`${base}/api/channel/sonar`, { method: 'POST', headers: json, body: '{"gain":' });
+    expect(garbled.status).toBe(400);
+    // A cross-site "simple request" (text/plain, no CORS preflight) must not reach the sonar.
+    const plain = await fetch(`${base}/api/system`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{"simulator":true}' });
+    expect(plain.status).toBe(415);
+    const sys = await fetch(`${base}/api/system`, { method: 'POST', headers: json, body: '{"simulator":true}' });
     expect((await sys.json()).system.simulator).toBe(true);
     expect((await fetch(`${base}/api/nope`)).status).toBe(404);
 
@@ -79,7 +85,11 @@ describe('plugin HTTP API (demo source)', () => {
     expect(res.headers.get('content-type')).toMatch(/text\/event-stream/);
     const reader = res.body!.getReader();
     let text = '';
-    while (!text.includes('event: live')) text += new TextDecoder().decode((await reader.read()).value);
+    while (!text.includes('event: live')) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error('stream ended before the backlog was sent');
+      text += new TextDecoder().decode(value);
+    }
     ctrl.abort();
     const events = [...text.matchAll(/^event: (\w+)$/gm)].map((m) => m[1]);
     expect(events[0]).toBe('state');
@@ -105,6 +115,7 @@ describe('plugin HTTP API (demo source)', () => {
 describe('plugin lifecycle', () => {
   test('schema has defaults and start/stop never throw', async () => {
     const p = plugin({ handleMessage: () => {} });
+    stop = () => p.stop();
     const schema = p.schema();
     expect(schema.type).toBe('object');
     expect(schema.properties.source.default).toBe('device');
@@ -132,7 +143,7 @@ describe('SSE backpressure', () => {
     setHeader() {}
     flushHeaders() {}
     write(c: string) { this.chunks.push(c); this.writableLength += c.length; return true; }
-    end() {}
+    end() { this.emit('close'); }
     destroy() { this.destroyed = true; this.emit('close'); }
   }
 
@@ -154,6 +165,22 @@ describe('SSE backpressure', () => {
     engine.emit('column', { ch: 'sonar', n: 2, data: '' });
     expect(slow.chunks.length).toBe(before);
     expect(fast.chunks.at(-1)).toMatch(/event: col/);
+    api.close();
+  });
+
+  test('refuses viewers beyond MAX_STREAMS', async () => {
+    const engine = Object.assign(new EventEmitter(), { state: () => ({}), history: () => [] });
+    const api = new Api(() => engine as unknown as Engine);
+    const req = () => Object.assign(new EventEmitter(), { method: 'GET' }) as never;
+    const all = Array.from({ length: MAX_STREAMS }, () => new FakeRes());
+    for (const r of all) await api.handle(req(), r as never, '/api/stream');
+    const extra = new FakeRes();
+    await api.handle(req(), extra as never, '/api/stream');
+    expect(extra.statusCode).toBe(503);
+    all[0].emit('close');
+    const again = new FakeRes();
+    await api.handle(req(), again as never, '/api/stream');
+    expect(again.statusCode).toBe(200);
     api.close();
   });
 });

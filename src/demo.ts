@@ -4,7 +4,7 @@
 
 import { EventEmitter } from 'node:events';
 import {
-  VERSION, MsgId, CHAN_SETTINGS_LEN, SYS_SETTINGS_LEN, CS, SS, UNIT_WIFISH, messageId, parseChannelSettings,
+  VERSION, MsgId, PING_CONFIGS, CHAN_SETTINGS_LEN, SYS_SETTINGS_LEN, CS, SS, UNIT_WIFISH, messageId, parseChannelSettings,
   parseSystemSettings,
 } from './sonar4';
 import { DEPTH_UNITS, presetCm } from './shared/units';
@@ -54,6 +54,7 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
   #rate: number;
   #rand: () => number;
   #timers: NodeJS.Timeout[] = [];
+  #connected: NodeJS.Immediate | null = null;
   #chan = new Map<number, Uint8Array>();
   #sys: Uint8Array;
   #x = 0;
@@ -66,10 +67,16 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
   constructor(opts: DemoOptions = {}) {
     super();
     this.model = opts.model ?? 'dragonfly';
-    this.#rate = opts.pingRate ?? 12;
+    this.#rate = opts.pingRate !== undefined && opts.pingRate > 0 ? opts.pingRate : 12;
     this.#rand = rng(opts.seed ?? 42);
     this.#chan.set(0, this.#makeChannel(0, 'CHIRP 200kHz'));
     this.#chan.set(1, this.#makeChannel(1, 'DownVision 350kHz'));
+    // A real unit reports all 32 ping configurations; the unused ones are disabled.
+    for (let i = 2; i < PING_CONFIGS; i++) {
+      const c = this.#makeChannel(i, `Config ${i}`);
+      c[CS.ENABLED] = 0;
+      this.#chan.set(i, c);
+    }
     const { b, v } = header(MsgId.SYS_SETTINGS, SYS_SETTINGS_LEN);
     putStr(b, SS.NAME, 'Demo', 32);
     v.setInt32(SS.TRANSDUCER_OFFSET, 0, true);
@@ -98,10 +105,12 @@ export class DemoDevice extends EventEmitter<TransportEvents> implements Transpo
     this.#broadcast();
     this.#timers.push(setInterval(() => this.#broadcast(), 1000));
     this.#timers.push(setInterval(() => this.#ping(), 1000 / this.#rate));
-    setImmediate(() => this.emit('link', 'connected', 'Demo sonar'));
+    this.#connected = setImmediate(() => { this.#connected = null; this.emit('link', 'connected', 'Demo sonar'); });
   }
 
   stop(): void {
+    if (this.#connected) clearImmediate(this.#connected);
+    this.#connected = null;
     for (const t of this.#timers) clearInterval(t);
     this.#timers = [];
     this.emit('link', 'offline', 'stopped');

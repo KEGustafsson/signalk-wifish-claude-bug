@@ -38,6 +38,8 @@ test('isWellFormed enforces §5 minimum and header length', () => {
   expect(isWellFormed(short, parseHeader(short)!)).toBe(false);
   const cut = msg(MsgId.ENV, 80).subarray(0, 70);
   expect(isWellFormed(cut, parseHeader(cut)!)).toBe(false);
+  const shortHeader = msg(MsgId.ENV, 68, (b) => b.writeUInt32LE(20, 4)); // 68 bytes, header says 20
+  expect(isWellFormed(shortHeader, parseHeader(shortHeader)!)).toBe(false);
   const unknown = msg(0x270109, 16);
   expect(isWellFormed(unknown, parseHeader(unknown)!)).toBe(true);
 });
@@ -97,6 +99,12 @@ describe('channel settings 0x270102', () => {
     expect(s).toMatchObject({ seq: 41, index: 3, name: 'CHIRP', enabled: true, rangeAuto: false, rangeShallowCm: 100, rangeDeepCm: 1800, gain: 70, gainAuto: false });
   });
 
+  test('reads the enabled and noise-auto bytes as signed, like the app', () => {
+    const b = channelSettings(1, 1);
+    b[CS.ENABLED] = 0x90; b[CS.NOISE_AUTO] = 0x90;
+    expect(parseChannelSettings(b)).toMatchObject({ enabled: false, noiseFilterAuto: false });
+  });
+
   test('rejects wrong size and index >= 32, like the app', () => {
     const b = channelSettings(1, 1);
     b.writeUInt32LE(95, 4);
@@ -148,6 +156,7 @@ describe('PingAssembler', () => {
 
   test('drops a ping on a gap, and interleaved seqs are independent', () => {
     const a = new PingAssembler();
+    a.addResults({ seq: 2, channel: 1, rangeStartCm: 0, rangeEndCm: 900 });
     a.push(parsePingData(segment({ seq: 1, seg: 0, count: 3, total: 6, offset: 0, data: [1, 1] })));
     const two = a.push(parsePingData(segment({ seq: 2, seg: 0, count: 1, total: 2, offset: 0, data: [9, 9] })))!;
     expect([...two.samples]).toEqual([9, 9]);
@@ -174,11 +183,27 @@ describe('PingAssembler', () => {
     expect(a.dropped).toBe(1);
   });
 
-  test('reports how many bytes were filled', () => {
+  test('a column is as long as the bytes received, like the app', () => {
     const a = new PingAssembler();
+    a.addResults({ seq: 6, channel: 0, rangeStartCm: 0, rangeEndCm: 600 });
     a.push(parsePingData(segment({ seq: 6, seg: 0, count: 2, total: 8, offset: 0, data: [1, 2] })));
-    const col = a.push(parsePingData(segment({ seq: 6, seg: 1, count: 2, total: 8, offset: 6, data: [7, 8] })))!;
-    expect(col.samples.length).toBe(8);
+    const col = a.push(parsePingData(segment({ seq: 6, seg: 1, count: 2, total: 8, offset: 2, data: [3, 4] })))!;
+    expect([...col.samples]).toEqual([1, 2, 3, 4]);
     expect(col.filled).toBe(4);
+  });
+
+  test('pairs results that arrive after the ping data', () => {
+    const a = new PingAssembler();
+    expect(a.push(parsePingData(segment({ seq: 8, seg: 0, count: 1, total: 2, offset: 0, data: [5, 6] })), 0)).toBeNull();
+    const col = a.addResults({ seq: 8, channel: 1, rangeStartCm: 0, rangeEndCm: 700 }, 10)!;
+    expect([...col.samples]).toEqual([5, 6]);
+    expect(col.results!.channel).toBe(1);
+  });
+
+  test('does not pair with stale results or a stale waiting column', () => {
+    const a = new PingAssembler({ staleMs: 1000 });
+    a.addResults({ seq: 9, channel: 0, rangeStartCm: 0, rangeEndCm: 700 }, 0);
+    expect(a.push(parsePingData(segment({ seq: 9, seg: 0, count: 1, total: 1, offset: 0, data: [1] })), 5000)).toBeNull();
+    expect(a.addResults({ seq: 9, channel: 0, rangeStartCm: 0, rangeEndCm: 700 }, 9000)).toBeNull();
   });
 });

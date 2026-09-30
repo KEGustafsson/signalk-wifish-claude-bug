@@ -110,6 +110,8 @@ export function plugin(app: ServerApp) {
     schema: () => schema,
 
     start(config: PluginConfig = {}) {
+      engine?.stop(); // a second start without stop must not leak the first engine's sockets
+      engine = null;
       try {
         const cfg: PluginConfig = { ...config };
         if (cfg.source === 'replay' && !cfg.replayFile) cfg.source = 'demo';
