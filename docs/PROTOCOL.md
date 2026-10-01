@@ -35,7 +35,7 @@ Wi-Fi multicast lock. Receive buffer 2048 bytes.
 ### Unit identification — msg id `1`
 | Off | Type | Meaning |
 |---|---|---|
-| 4 | u32 | unit type (63 = Wi-Fish) ✅ |
+| 4 | u32 | unit type: 63 Wi-Fish dv, 66 Dragonfly-5 Pro, 67 Dragonfly-4 Pro, 78 Dragonfly-7 Pro ✅ |
 | 8 | u32 | shown as hex, probably serial 🟡 |
 | 12 | u32 | ❓ |
 | 20..51 | char[32] | unit name, NUL-padded ✅ |
@@ -45,10 +45,12 @@ Wi-Fi multicast lock. Receive buffer 2048 bytes.
 1. Join `224.0.0.1:5800`; wait for **msg 0 / service 39** and **msg 1**.
 2. Join the announced data group:port.
 3. Every **1 s**, send a keepalive (§4) to device IP : control port.
-4. Wait until all "required" messages have arrived at least once: env data
-   (0x270104), error status (0x27010D), system status (0x270103), system
-   settings (0x270106), per-channel sonar settings (0x270102). Then set
-   keepalive byte 16 = 1 ("connected").
+4. Wait until the unit id (msg 1), env data (0x270104), error status
+   (0x27010D), system status (0x270103), system settings (0x270106) and the
+   channel settings (0x270102) of **all 32 ping configurations** have each
+   arrived at least once (`d0.c.c()` sums the decoders' outstanding counts; the
+   channel-settings decoder counts every index 0‥31 not yet seen). Then set
+   keepalive byte 16 = 1 ("connected"). The app gives up after 15 s.
 5. Stream ping data / results / bottom depth.
 
 ## 4. Sonar4 common header (all 0x2701xx messages)
@@ -97,10 +99,13 @@ length field (off 4), is malformed and should be dropped.
 | 17 | i32 | **depth, cm**; `INT32_MIN` = no bottom lock ✅ |
 | 21 | u8 | clamped 0..2 ❓ (channel/source?) |
 
-The app shows this value raw as "bottom" and subtracts the transducer offset
-(system settings, off 58, i16 🟡) only when drawing traces. Whether the
-reported value is below-transducer or below-surface must be checked against a
-known depth. ❓
+The app shows this value as the depth readout (negative values as 0) and hands `depth − offset`
+to the traces, where offset is the transducer offset from system settings
+(off 60, §6) ✅. The traces are transducer-relative, so the reported depth
+already has the offset applied 🟡: offset > 0 → depth below surface,
+offset < 0 → depth below keel, 0 → below transducer. To be confirmed against
+a known depth. The app updates the readout at most once per second and blanks
+it when no valid depth has come for 6 s after a no-lock record.
 
 ### Environment data — 0x270104
 | Off | Type | Meaning |
@@ -111,7 +116,15 @@ known depth. ❓
 ### Error status — 0x27010D
 | Off | Type | Meaning |
 |---|---|---|
-| 16 | u32 | error flags; bit 0x100 selects one of two UI warnings 🟡 (likely low voltage vs. no transducer) |
+| 16 | u32 | error flags; bit **0x100 = supply voltage too low** (the app opens its low-voltage dialog while set, closes it when clear) ✅ |
+
+### System status — 0x270103
+| Off | Type | Meaning |
+|---|---|---|
+| 18 | u8 | software major version ✅ (the app warns Dragonfly-4/5 owners below a minimum) |
+| 19 | u8 | software minor version ✅ |
+| 16..38 | | further i16/u8/i32 fields, unused ❓ |
+| 39..1099 | char[] | status text, trimmed 🟡 |
 
 ### Ping data — 0x270101 ✅ (segmented; reassemble per ping)
 | Off | Type | Meaning |
@@ -127,7 +140,9 @@ known depth. ❓
 | 36 | u8 | range/setting index 🟡 |
 | 37.. | u8[] | echo samples (1 byte each, 🟡 0 = no return) |
 
-Column complete when `segment == count − 1`. Drop the ping on a gap.
+Column complete when `segment == count − 1`. Drop the ping on a gap. The
+column's length is the number of bytes received (`e0.e.f()`); `total` (off 24)
+is only cross-checked and logged.
 
 ### Ping results — 0x27010B
 | Off | Type | Meaning |
@@ -140,15 +155,85 @@ Column complete when `segment == count − 1`. Drop the ping on a gap.
 | 112..129 | | ❓ |
 
 Pair each completed Ping data column with the Ping results of the same
-sequence to get channel and vertical scale.
+sequence to get channel and vertical scale. The app re-checks the pairing on
+**both** message types (`SounderService` task, 0x270101 and 0x27010B), so it
+works whichever of the two arrives last.
 
-## 6. Settings (client → device)
-Both settings messages are **read-modify-write**: the device broadcasts
-current state and the app sends back a modified copy (same id and layout).
-A passive depth reader never needs to send them.
+**Vertical scale** ✅ (from the app's GL renderer): the *n* samples of a column
+cover **0 … range end** below the transducer, sample *i* at
+`(i + 0.5) / n × end`. The default view window is **range start … range end**.
+Range start/end come from Ping results (off 104/108) when the channel's range
+is auto, otherwise from its channel settings (off 63/67). Ping data off 36 is
+the **ping configuration index** of the channel settings the column was made
+with; the app draws only configurations whose settings it has received and
+whose "enabled" byte (off 55, read signed) is > 0.
+Samples are palette indices 0‥255. The app snaps the displayed window to the
+nearest range preset of the current depth unit (`z.b.h()`), and when the unit
+changes it snaps the channels' shallow/deep to the new unit's presets and sends
+them (`SonarTraceActivity`).
+
+## 6. Settings (client → device) ✅
+Both settings messages are **read-modify-write**: the device broadcasts its
+current state, the client sends a modified copy (same id, same layout, header
+off 4/8/12 copied) to the device control port, with the settings seq at off 16
+set to the last seq + 1. A received message replaces the held copy only if its
+seq is newer. A passive depth reader never needs to send them. (This project
+patches a copy of the received datagram so unknown bytes survive; the app
+re-encodes from fields and, due to a bug, writes byte 72 back to off 73.)
+
+The commands go over UDP and are not acknowledged; the device's next broadcast
+is the only confirmation. This project therefore keeps the device's copy and
+its own unconfirmed change apart: the change is shown at once and becomes the
+held copy when the device broadcasts a seq at least as new. While the device
+keeps broadcasting the older seq, the command is resent (up to 3 sends, 1 s
+apart); after that its own values are shown again. Without any broadcast there
+is no evidence either way and the change stays shown. Depth conversions always
+use the device's confirmed transducer offset, since the device applies it.
+
+### Sonar channel ("ping parameters") — 0x270102, exactly 94 bytes
+One message per ping configuration (index 0‥31); the Sensitivity settings go to
+the configuration of the channel being adjusted, Range settings to both channels'.
+
+| Off | Type | Meaning | UI |
+|---|---|---|---|
+| 16 | i32 | settings seq | |
+| 20 | u8 | ping configuration index (< 32) | |
+| 21..52 | char[32] | name | |
+| 55 | u8 | > 0 = configuration enabled | |
+| 62 | u8 | range auto (1/0) | Range ▸ Auto |
+| 63 | i32 | range shallow, cm | Range ▸ Shallow |
+| 67 | i32 | range deep, cm | Range ▸ Deep |
+| 71 | i16 | ❓ (the app decodes byte 72 on its own and writes it back to 73) | |
+| 76 | u8 | contrast auto (1/0) | Sensitivity ▸ Contrast Auto |
+| 77 | u8 | contrast 0‥100 | Sensitivity ▸ Contrast |
+| 78 | u8 | gain auto (1/0) | Sensitivity ▸ Gain Auto |
+| 79 | u8 | gain 0‥100 | Sensitivity ▸ Gain |
+| 80 | u8 | noise filter auto (app writes 2 = auto, 0 = manual; reads > 0) | Sensitivity ▸ Noise filter Auto |
+| 81 | u8 | noise filter 0‥100 | Sensitivity ▸ Noise filter |
+| 53..61, 73..75, 82..93 | u8 | ❓ | |
+
+Range presets offered by the app (Shallow lists presets below Deep, Deep
+presets above Shallow), sent as `trunc(preset × unit)` cm:
+- feet (30.48): 5 6 8 10 12 15 18 20 24 30 35 40 50 60 80 100 120 150 180 240 300 350 400 500 600 800 1000 1200
+- metres (100): 2 3 4 5 6 8 10 12 15 18 20 24 30 35 40 50 60 80 100 120 150 180 240 300 360
+- fathoms (182.88): 1 2 3 4 5 6 8 10 12 15 18 20 24 30 35 40 50 60 80 100 125 150 180 200
+
+### System settings — 0x270106, 562 bytes
+| Off | Type | Meaning |
+|---|---|---|
+| 16 | i32 | settings seq |
+| 20..52 | char[33] | name |
+| 52..59 | u8/i16 | ❓ |
+| 60 | i32 | **transducer offset, cm**, ±300: > 0 transducer below waterline, < 0 above keel |
+| 64 / 66 / 67 / 68 / 70 | i16 / u8 / u8 / i16 / u8 | decoded by the app, unused ❓ |
+| 71 / 75 | i32 / i32 | decoded by the app, unused ❓ |
+| 79 | u8 | depth unit: 0 feet, 1 metres, 2 fathoms (the app adopts it for display) |
+| 80 | u8 | **simulator**: 2 = on, 0 = off (the app shows a blinking "Simulated data") |
+| 81 / 241 / 401 | i32[40] ×3 | range preset tables in cm for feet / metres / fathoms, −1 padded (the app rewrites them from its constants) |
+| 561 | u8 | ❓ |
 
 ## 7. Open questions for hardware testing
-- Does the unit accept a second client (Jetson + phone at once)?
+- Does the unit accept a second client (Jetson + phone at once)? Do settings from one client show up in the other?
 - Does data flow without a keepalive? How long after the last keepalive does it stop?
-- Is depth below-transducer or offset-corrected?
+- Confirm the offset convention: is the reported depth offset-corrected (§5)?
 - Semantics of the ❓ fields, especially Environment data and Ping results.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Wi-Fish "Sonar4" probe — discovery, keepalive, depth/temp decode, raw logging.
-// Spec: docs/PROTOCOL.md. Decoding lives in lib/sonar4.mjs. No dependencies.
+// Spec: docs/PROTOCOL.md. Decoding lives in src/sonar4.ts (run `npm run build:server` first).
 
 import dgram from 'node:dgram';
 import os from 'node:os';
@@ -13,9 +13,9 @@ import {
   VERSION, DISCOVERY, SERVICE_SONAR, MsgId, REQUIRED,
   messageId, parseHeader, isWellFormed, parseAnnounce, checkService, parseUnit,
   parseBottom, parseEnv, parseError, parsePingResults, parsePingData, buildKeepalive, PingAssembler,
-} from '../lib/sonar4.mjs';
-import { PATH, cmToM, centiCToK, toDelta, Throttle } from '../lib/signalk.mjs';
-import { CHANNEL, encodeRecord, readRawLog } from '../lib/rawlog.mjs';
+} from '../dist/sonar4.js';
+import { PATH, cmToM, centiCToK, toDelta, Throttle } from '../dist/signalk.js';
+import { CHANNEL, encodeRecord, readRawLog } from '../dist/rawlog.js';
 
 const USAGE = `Usage: wifish-probe [options]
   --iface <ipv4>     local WLAN address (default: the 192.x address on the sonar's subnet)
@@ -83,6 +83,14 @@ const warned = new Set();
 const warnOnce = (key, msg) => { if (!warned.has(key)) { warned.add(key); console.warn(msg); } };
 const nameOf = (id) => typeof id === 'string' ? id : Object.keys(MsgId).find((k) => MsgId[k] === id) ?? `0x${id.toString(16)}`;
 const asm = new PingAssembler();
+
+/** Count a completed column and log every 50th. */
+function logColumn(col) {
+  if (!col || columns++ % 50 !== 0) return;
+  const r = col.results;
+  const max = col.samples.reduce((a, v) => (v > a ? v : a), 0);
+  console.log(`[ping] seq=${col.seq} n=${col.samples.length} filled=${col.filled} ch=${r?.channel ?? '?'} range=${r ? r.rangeStartCm + '..' + r.rangeEndCm : '?'} max=${max} dropped=${asm.dropped}`);
+}
 let tempCentiC, lastRx = 0, columns = 0;
 
 function handleSonar(b, via) {
@@ -111,18 +119,13 @@ function handleSonar(b, via) {
     case MsgId.ERROR:
       console.log(`[error] flags=0x${parseError(b).flags.toString(16)}`);
       break;
+    // A column completes on whichever of its data and results arrives last.
     case MsgId.PING_RESULTS:
-      asm.addResults(parsePingResults(b));
+      logColumn(asm.addResults(parsePingResults(b), mono()));
       break;
-    case MsgId.PING_DATA: {
-      const col = asm.push(parsePingData(b), mono());
-      if (col && columns++ % 50 === 0) {
-        const r = col.results;
-        const max = col.samples.reduce((a, v) => (v > a ? v : a), 0);
-        console.log(`[ping] seq=${col.seq} n=${col.samples.length} filled=${col.filled} ch=${r?.channel ?? '?'} range=${r ? r.rangeStartCm + '..' + r.rangeEndCm : '?'} max=${max} dropped=${asm.dropped}`);
-      }
+    case MsgId.PING_DATA:
+      logColumn(asm.push(parsePingData(b), mono()));
       break;
-    }
   }
 }
 
