@@ -1,9 +1,10 @@
 // One echogram trace (CHIRP sonar or DownVision), drawn like the app's SonarTraceView:
 // columns scroll in from the right, one ping per column, colour = palette[sample].
 // Samples of a column span 0..endCm below the transducer; the default view
-// window is the ping's [startCm, endCm]. Pinch/wheel zooms vertically (a zoom box
-// with the full range then appears on the right), the optional A-scope shows the
-// latest ping as a centred bar graph.
+// window is the ping's [startCm, endCm] in displayed depth (transducer offset
+// added), so the ruler starts at 0 and the echoes move with the offset.
+// Pinch/wheel zooms vertically (a zoom box with the full range then appears on
+// the right), the optional A-scope shows the latest ping as a centred bar graph.
 
 import { lut } from './palettes';
 import type { ColumnStore, Col } from './history';
@@ -36,6 +37,7 @@ export class TraceView {
 
   palette = 4;
   unit!: DepthUnit;
+  /** Transducer offset, cm: displayed depth = depth below transducer + offsetCm. */
   offsetCm = 0;
   depthLines = false;
   aScope = false;
@@ -131,14 +133,20 @@ export class TraceView {
     return this.store.get(this.right) ?? this.store.cols[this.store.cols.length - 1];
   }
 
-  /** Unzoomed window: the reference ping's range snapped to the unit's presets (0..10 m without data). */
+  /**
+   * Unzoomed window, cm below the transducer: the reference ping's range snapped to
+   * the unit's presets (0..10 m without data), taken as *displayed* depths like the
+   * app, so it starts at 0 on the ruler and the echoes shift by the transducer offset.
+   */
   fullWindow(): Window {
     const c = this.refColumn();
-    if (!c) return { top: 0, bottom: 1000 };
+    const off = this.offsetCm;
+    if (!c) return { top: -off, bottom: 1000 - off };
     // Like the app (z.b.h()), the window is the ping's range snapped to the unit's presets.
     const top = this.unit ? snapToPreset(this.unit, c.startCm) : c.startCm;
     const bottom = this.unit ? snapToPreset(this.unit, c.endCm) : c.endCm;
-    return bottom > top ? { top, bottom } : { top: c.startCm, bottom: c.endCm };
+    const w = bottom > top ? { top, bottom } : { top: c.startCm, bottom: c.endCm };
+    return { top: w.top - off, bottom: w.bottom - off };
   }
 
   /** Window shown in the main area: the zoom, or else the full range. */
@@ -439,7 +447,7 @@ export class TraceView {
     const bottomU = (w.bottom + off) / u.cm;
     const spanU = bottomU - topU;
     // A preset range from the surface gets the app's line count; anything else a "nice" step.
-    const lines = w.top === 0 && off === 0 ? depthLinesFor(u, Math.round(spanCm)) : -1;
+    const lines = w.top + off === 0 ? depthLinesFor(u, Math.round(spanCm)) : -1;
     let step: number;
     if (lines > 0) step = spanU / (lines + 1);
     else {
