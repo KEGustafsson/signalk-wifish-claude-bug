@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Depth ruler starts at 0 where the samples start, like the Android app; it no longer
+  shifts by the transducer offset (e.g. -0.3 at the top with 0.3 m above keel). The
+  offset still applies to the depth readout and Signal K paths.
 - Fix the web app icon missing from the Signal K admin web app list: `appIcon` is
   resolved relative to `public/`, so it now points to `./icon.svg`.
 

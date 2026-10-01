@@ -94,16 +94,14 @@ function unitChanged(u: DepthUnit): void {
   ctx.sendChannel(ch, { rangeAuto: cs.rangeAuto, rangeShallowCm: shallow, rangeDeepCm: deep }).catch(() => {});
 }
 
-/** Push the prefs (unit, palettes, offset, depth lines, A-scope, speed) to the traces and repaint the databox. */
+/** Push the prefs (unit, palettes, depth lines, A-scope, speed) to the traces and repaint the databox. */
 function applyPrefs(): void {
   const u = depthUnit();
   if (state) unitChanged(u);
-  const offset = state?.system?.transducerOffsetCm ?? 0;
   traces.sonar.palette = prefs.paletteSonar;
   traces.downvision.palette = prefs.paletteDownvision;
   for (const t of Object.values(traces)) {
     t.unit = u;
-    t.offsetCm = offset;
     t.depthLines = prefs.depthLines;
     t.aScope = prefs.aScope;
     t.setSpeed(prefs.speed);
@@ -360,7 +358,8 @@ function showDetails(x: number, y: number): void {
   if (!col) return;
   const u = depthUnit();
   const off = state?.system?.transducerOffsetCm ?? 0;
-  const d = formatDepth(depthCm + off, u);
+  // Depth at the point reads off the ruler (transducer-relative); the bottom is the sonar's own reading.
+  const d = formatDepth(depthCm, u);
   const b = formatDepth(col.bottomCm === null ? null : col.bottomCm + off, u);
   const temp = formatTemp(col.tempCentiC, prefs.tempUnit);
   const ago = Math.max(0, Math.round((Date.now() - col.t) / 1000));

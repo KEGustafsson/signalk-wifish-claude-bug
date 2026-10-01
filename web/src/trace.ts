@@ -36,7 +36,6 @@ export class TraceView {
 
   palette = 4;
   unit!: DepthUnit;
-  offsetCm = 0;
   depthLines = false;
   aScope = false;
   /** Screen px per column. */
@@ -428,18 +427,18 @@ export class TraceView {
 
   /**
    * Depth scale along the right edge `xr` for window `w` (app: DepthRulerView).
-   * Marks sit on round *displayed* depths, i.e. with the transducer offset added.
+   * Like the app, the scale is transducer-relative: 0 is where the samples start,
+   * whatever the transducer offset (the offset only applies to the depth readout).
    */
   #ruler(ctx: CanvasRenderingContext2D, xr: number, H: number, w: Window, main: boolean): void {
     const u = this.unit;
     const spanCm = w.bottom - w.top;
     if (!(spanCm > 0)) return;
-    const off = this.offsetCm;
-    const topU = (w.top + off) / u.cm;
-    const bottomU = (w.bottom + off) / u.cm;
+    const topU = w.top / u.cm;
+    const bottomU = w.bottom / u.cm;
     const spanU = bottomU - topU;
     // A preset range from the surface gets the app's line count; anything else a "nice" step.
-    const lines = w.top === 0 && off === 0 ? depthLinesFor(u, Math.round(spanCm)) : -1;
+    const lines = w.top === 0 ? depthLinesFor(u, Math.round(spanCm)) : -1;
     let step: number;
     if (lines > 0) step = spanU / (lines + 1);
     else {
