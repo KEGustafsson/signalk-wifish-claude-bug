@@ -20,6 +20,8 @@ export interface Prefs {
 }
 
 const KEY = 'signalk-wifish.prefs';
+/** Prefs this browser has stored (picked by the user here), as opposed to defaults. */
+export const storedKeys = new Set<string>();
 /** Fresh default prefs; °F for US-style locales, °C otherwise. */
 const defaults = (): Prefs => ({
   paletteSonar: DEFAULT_PALETTE.sonar,
@@ -37,7 +39,11 @@ const defaults = (): Prefs => ({
 function load(): Prefs {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...defaults(), ...JSON.parse(raw) };
+    if (raw) {
+      const stored = JSON.parse(raw);
+      for (const k of Object.keys(stored)) storedKeys.add(k);
+      return { ...defaults(), ...stored };
+    }
   } catch { /* private window, blocked storage */ }
   return defaults();
 }
@@ -47,5 +53,6 @@ export const prefs: Prefs = load();
 /** Apply `patch` to the live prefs and persist them (best effort). */
 export function savePrefs(patch: Partial<Prefs>): void {
   Object.assign(prefs, patch);
+  for (const k of Object.keys(patch)) storedKeys.add(k);
   try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* not persisted */ }
 }

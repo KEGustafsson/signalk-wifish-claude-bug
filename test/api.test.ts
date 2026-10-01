@@ -1,5 +1,8 @@
 import { describe, test, expect, afterEach } from 'vitest';
 import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { plugin } from '../src/plugin';
 import { EventEmitter } from 'node:events';
@@ -36,10 +39,13 @@ afterEach(async () => {
   server = null;
 });
 
-async function startPlugin(config: Record<string, unknown>) {
+async function startPlugin(config: Record<string, unknown>, dataDir?: string) {
   const deltas: Delta[] = [];
   const statuses: string[] = [];
-  const p = plugin({ handleMessage: (_id, d) => deltas.push(d), setPluginStatus: (m) => statuses.push(m), setPluginError: (m) => statuses.push(`ERR ${m}`) });
+  const p = plugin({
+    handleMessage: (_id, d) => deltas.push(d), setPluginStatus: (m) => statuses.push(m), setPluginError: (m) => statuses.push(`ERR ${m}`),
+    getDataDirPath: dataDir ? () => dataDir : undefined,
+  });
   let mw: Mw | null = null;
   p.registerWithRouter({ use: (fn: Mw) => { mw = fn; } });
   p.start(config);
@@ -92,9 +98,37 @@ describe('plugin HTTP API (demo source)', () => {
     }
     ctrl.abort();
     const events = [...text.matchAll(/^event: (\w+)$/gm)].map((m) => m[1]);
-    expect(events[0]).toBe('state');
+    expect(events.slice(0, 2)).toEqual(['display', 'state']);
     expect(events.filter((e) => e === 'col').length).toBeGreaterThan(5);
     expect(deltas.length).toBeGreaterThan(0);
+  });
+
+  test('display units are shared by all viewers and survive a restart', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wifish-'));
+    const json = { 'content-type': 'application/json' };
+    let { base } = await startPlugin({ source: 'demo' }, dir);
+    expect(await (await fetch(`${base}/api/display`)).json()).toEqual({});
+
+    // A viewer listening on the stream gets the change another viewer makes.
+    const ctrl = new AbortController();
+    const reader = (await fetch(`${base}/api/stream`, { signal: ctrl.signal })).body!.getReader();
+    const bad = await fetch(`${base}/api/display`, { method: 'POST', headers: json, body: '{"tempUnit":"K"}' });
+    expect(bad.status).toBe(400);
+    const r = await fetch(`${base}/api/display`, { method: 'POST', headers: json, body: '{"depthUnit":"ft","tempUnit":"F"}' });
+    expect(await r.json()).toEqual({ depthUnit: 'ft', tempUnit: 'F' });
+    let text = '';
+    while (!/event: display\ndata: \{"depthUnit/.test(text)) text += new TextDecoder().decode((await reader.read()).value);
+    ctrl.abort();
+    expect(text.startsWith('retry: 2000\n\nevent: display\ndata: {}')).toBe(true);
+    expect(text).toContain('event: display\ndata: {"depthUnit":"ft","tempUnit":"F"}');
+
+    // Following the sonar's unit is a choice too (null), and the file outlives the plugin.
+    await fetch(`${base}/api/display`, { method: 'POST', headers: json, body: '{"depthUnit":null}' });
+    stop!();
+    await new Promise<void>((res) => server!.close(() => res()));
+    ({ base } = await startPlugin({ source: 'demo' }, dir));
+    expect(await (await fetch(`${base}/api/display`)).json()).toEqual({ depthUnit: null, tempUnit: 'F' });
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   test('replay without a file falls back to the demo', async () => {

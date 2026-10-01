@@ -2,6 +2,7 @@
 //   node dist/devserver.js --demo [--wifish] [--port 3000]
 //   node dist/devserver.js --device [--iface 192.168.x.y] [--passive]
 //   node dist/devserver.js --replay raw.bin
+//   add --data <dir> to keep the web app's display units in <dir>/display.json
 // Serves public/ at / and /signalk-wifish/, the API at /plugins/signalk-wifish/, and
 // prints Signal K deltas with --deltas.
 
@@ -24,11 +25,12 @@ const { values } = parseArgs({
     port: { type: 'string', default: '3000' },
     host: { type: 'string', default: '127.0.0.1' },
     deltas: { type: 'boolean', default: false },
+    data: { type: 'string' },
     help: { type: 'boolean', short: 'h', default: false },
   },
 });
 if (values.help) {
-  console.log('Usage: devserver [--demo [--wifish] | --device [--iface ip] [--passive] | --replay file] [--port 3000] [--host 127.0.0.1] [--deltas]');
+  console.log('Usage: devserver [--demo [--wifish] | --device [--iface ip] [--passive] | --replay file] [--port 3000] [--host 127.0.0.1] [--deltas] [--data dir]');
   process.exit(0);
 }
 
@@ -45,6 +47,7 @@ const p = plugin({
   setPluginStatus: (m) => log('status:', m),
   setPluginError: (m) => log('error:', m),
   debug: (m) => log(m),
+  getDataDirPath: values.data ? () => path.resolve(process.env.INIT_CWD ?? process.cwd(), values.data!) : undefined,
 });
 
 type Handler = (req: http.IncomingMessage & { path?: string }, res: http.ServerResponse, next: (e?: unknown) => void) => void;

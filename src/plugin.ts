@@ -2,7 +2,9 @@
 // Publishes depth and water temperature and serves the echogram web app's API.
 
 import { Engine } from './engine';
+import path from 'node:path';
 import { Api } from './api';
+import { DisplayStore } from './display';
 import { DeviceTransport } from './device';
 import { DemoDevice } from './demo';
 import { ReplayTransport } from './replay';
@@ -18,6 +20,8 @@ export interface ServerApp {
   setPluginError?(msg: string): void;
   debug?(...args: unknown[]): void;
   error?(...args: unknown[]): void;
+  /** The plugin's own data directory (provided by the Signal K server once the plugin is registered). */
+  getDataDirPath?(): string;
 }
 
 export interface PluginConfig {
@@ -97,9 +101,14 @@ export function createTransport(cfg: PluginConfig, isReady: () => boolean, log: 
 /** Build the Signal K plugin: runs an Engine for the configured source and serves the web app's API. */
 export function plugin(app: ServerApp) {
   let engine: Engine | null = null;
-  const api = new Api(() => engine);
   /** Log through the server's debug logger, if it has one. */
   const debug = (m: string) => app.debug?.(m);
+  /** The web app's display units, saved in the plugin's data directory. */
+  const display = new DisplayStore(() => {
+    const dir = app.getDataDirPath?.();
+    return dir ? path.join(dir, 'display.json') : undefined;
+  }, debug);
+  const api = new Api(() => engine, display);
 
   /** Show link changes as plugin status; 'offline' (other than after stop) as a plugin error. */
   const status = (link: string, msg: string) => {

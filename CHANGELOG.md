@@ -26,6 +26,8 @@
 - Hardening: JSON-only settings API (no cross-site form posts), capped event
   streams with per-viewer buffer limits, stricter message validation,
   incremental echogram rendering, keyboard and screen-reader support in dialogs.
+- Depth and temperature units picked in the web app are kept by the plugin and shared
+  by every viewer, so the choice is remembered across browsers, devices and restarts.
 - Signal K plugin CI workflow; tests moved to vitest.
 
 ## 0.1.0

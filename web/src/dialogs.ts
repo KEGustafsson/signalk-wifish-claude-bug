@@ -4,7 +4,7 @@ import { PALETTES, SONAR_PALETTES, DOWNVISION_PALETTES, cssColour } from './pale
 import { prefs, savePrefs } from './prefs';
 import { TILES } from './icons';
 import { DEPTH_UNITS, presetCm, type DepthUnit } from '../../src/shared/units';
-import type { ChannelName, ChannelPatch, ChannelSettingsView, SystemPatch, WifishState } from '../../src/shared/api';
+import type { ChannelName, ChannelPatch, ChannelSettingsView, DisplayPrefs, SystemPatch, WifishState } from '../../src/shared/api';
 import type { ViewConfig } from './prefs';
 
 /**
@@ -203,6 +203,8 @@ export interface Ctx {
   sendChannel(ch: ChannelName, patch: ChannelPatch): Promise<void>;
   sendSystem(patch: SystemPatch): Promise<void>;
   applyPrefs(): void;
+  /** Use these display units here and save them on the plugin for every viewer. */
+  setUnits(patch: DisplayPrefs): void;
   onState(cb: (s: WifishState | null) => void): () => void;
 }
 
@@ -427,8 +429,8 @@ export function mainSettings(ctx: Ctx): DialogHandle {
   const devUnit = s?.system ? DEPTH_UNITS.find((u) => u.code === s.system!.depthUnit) : undefined;
   const unitSel = select(
     [{ value: '', label: `Sonar setting${devUnit ? ` (${devUnit.label})` : ''}` }, ...DEPTH_UNITS.map((u) => ({ value: u.id, label: u.label }))],
-    prefs.depthUnit ?? '', (v) => { savePrefs({ depthUnit: (v || null) as typeof prefs.depthUnit }); ctx.applyPrefs(); paintDepth(); }, 'Depth units');
-  const tempSel = select([{ value: 'F', label: '°F' }, { value: 'C', label: '°C' }], prefs.tempUnit, (v) => { savePrefs({ tempUnit: v as 'C' | 'F' }); ctx.applyPrefs(); }, 'Temperature units');
+    prefs.depthUnit ?? '', (v) => { ctx.setUnits({ depthUnit: (v || null) as DisplayPrefs['depthUnit'] }); paintDepth(); }, 'Depth units');
+  const tempSel = select([{ value: 'F', label: '°F' }, { value: 'C', label: '°C' }], prefs.tempUnit, (v) => ctx.setUnits({ tempUnit: v as 'C' | 'F' }), 'Temperature units');
 
   /** Append a labelled settings row to the table. */
   const row = (label: string, el: HTMLElement) => table.append(h('div', { class: 'row' }, h('span', { class: 'label' }, label), el));
@@ -439,7 +441,8 @@ export function mainSettings(ctx: Ctx): DialogHandle {
   if (s?.system && s.unit?.wifish) {
     row('Simulator', toggle(s.system.simulator, (v) => { ctx.sendSystem({ simulator: v }).catch(() => {}); }, 'Simulator'));
   }
-  const unsub = ctx.onState(() => paintDepth());
+  // Another viewer may change the shared units while this dialog is open.
+  const unsub = ctx.onState(() => { paintDepth(); unitSel.value = prefs.depthUnit ?? ''; tempSel.value = prefs.tempUnit; });
   return openDialog(table, { title: 'Settings', modal: true, className: 'main', onClose: unsub });
 }
 

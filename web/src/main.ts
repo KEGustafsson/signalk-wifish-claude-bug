@@ -2,15 +2,15 @@
 
 import { ColumnStore } from './history';
 import { TraceView } from './trace';
-import { PluginStream, setChannel, setSystem } from './stream';
-import { prefs, savePrefs, type ViewConfig } from './prefs';
+import { PluginStream, setChannel, setDisplay, setSystem } from './stream';
+import { prefs, savePrefs, storedKeys, type Prefs, type ViewConfig } from './prefs';
 import { ICONS } from './icons';
 import {
   aboutDialog, closeAll, helpDialog, mainSettings, messageBox, overflowMenu, sonarSettings, viewSwitcher,
   type Ctx, type DialogHandle,
 } from './dialogs';
 import { formatDepth, formatTemp, snapToPreset, unitByCode, unitById, type DepthUnit } from '../../src/shared/units';
-import type { ChannelName, WifishState } from '../../src/shared/api';
+import type { ChannelName, DisplayPrefs, WifishState } from '../../src/shared/api';
 
 declare const __VERSION__: string;
 
@@ -587,9 +587,37 @@ const ctx: Ctx = {
     try { onState(await setSystem(patch)); } catch (e) { toast((e as Error).message); throw e; }
   },
   applyPrefs: () => { applyPrefs(); applyView(); },
+  /** Use the units here at once, then save them on the plugin so every viewer and later visit gets them. */
+  setUnits(patch) {
+    useUnits(patch);
+    setDisplay(patch).catch((e) => toast(`Units not saved on the server: ${(e as Error).message}`));
+  },
   /** Subscribe to state changes; returns an unsubscribe function. */
   onState(cb) { listeners.add(cb); return () => listeners.delete(cb); },
 };
+
+/** Apply display units (kept in this browser too); repaint and tell open dialogs when they changed. */
+function useUnits(d: DisplayPrefs): void {
+  const patch: Partial<Prefs> = {};
+  if (d.depthUnit !== undefined && d.depthUnit !== prefs.depthUnit) patch.depthUnit = d.depthUnit;
+  if (d.tempUnit !== undefined && d.tempUnit !== prefs.tempUnit) patch.tempUnit = d.tempUnit;
+  if (!Object.keys(patch).length) return;
+  savePrefs(patch);
+  applyPrefs();
+  for (const l of listeners) l(state);
+}
+
+/**
+ * Units the plugin keeps for all viewers: take those picked anywhere; for any not picked
+ * yet, offer the one picked earlier in this browser so it is not lost.
+ */
+function onDisplay(d: DisplayPrefs): void {
+  useUnits(d);
+  const offer: DisplayPrefs = {};
+  if (d.depthUnit === undefined && storedKeys.has('depthUnit')) offer.depthUnit = prefs.depthUnit;
+  if (d.tempUnit === undefined && storedKeys.has('tempUnit')) offer.tempUnit = prefs.tempUnit;
+  if (Object.keys(offer).length) setDisplay(offer).catch(() => { /* kept in this browser */ });
+}
 
 /** Clear the stores and return the traces to live and unzoomed. */
 function resetHistory(): void {
@@ -616,6 +644,7 @@ function toast(msg: string): void {
 
 const stream = new PluginStream({
   state: onState,
+  display: onDisplay,
   /** Store an incoming ping column and redraw its trace if it is live or zoomed. */
   column(c) {
     stores[c.ch].add(c);

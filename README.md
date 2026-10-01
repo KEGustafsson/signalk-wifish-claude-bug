@@ -75,7 +75,9 @@ The screen follows the Android app:
 
 ![Sonar settings](docs/screenshot-settings.jpg)
 
-Palettes, units, view and similar preferences are stored per browser.
+Depth and temperature units are kept by the plugin (in its data directory), so they are the
+same on every browser and device and survive restarts. Palettes, view and similar
+preferences are stored per browser.
 
 ## Development
 

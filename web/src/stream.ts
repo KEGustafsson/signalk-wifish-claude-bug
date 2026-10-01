@@ -1,9 +1,10 @@
 // Connection to the plugin: SSE for state and columns, fetch for settings.
 
-import { API_BASE, type ChannelName, type ChannelPatch, type ColumnMessage, type SystemPatch, type WifishState } from '../../src/shared/api';
+import { API_BASE, type ChannelName, type ChannelPatch, type ColumnMessage, type DisplayPrefs, type SystemPatch, type WifishState } from '../../src/shared/api';
 
 export interface StreamHandlers {
   state(s: WifishState | null): void;
+  display(d: DisplayPrefs): void;
   column(c: ColumnMessage): void;
   reset(): void;
   live(): void;
@@ -22,6 +23,7 @@ export class PluginStream {
     this.#es = es;
     es.addEventListener('open', () => this.h.connection(true));
     es.addEventListener('error', () => this.h.connection(false));
+    es.addEventListener('display', (e) => this.h.display(JSON.parse((e as MessageEvent).data)));
     es.addEventListener('state', (e) => this.h.state(JSON.parse((e as MessageEvent).data)));
     es.addEventListener('col', (e) => this.h.column(JSON.parse((e as MessageEvent).data)));
     es.addEventListener('reset', () => this.h.reset());
@@ -35,8 +37,8 @@ export class PluginStream {
   }
 }
 
-/** POST JSON to the plugin API; resolves to the new state or throws with the server's error message. */
-async function post(path: string, body: unknown): Promise<WifishState> {
+/** POST JSON to the plugin API; resolves to its JSON reply or throws with the server's error message. */
+async function post<T = WifishState>(path: string, body: unknown): Promise<T> {
   const r = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -45,10 +47,12 @@ async function post(path: string, body: unknown): Promise<WifishState> {
   });
   const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
   if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
-  return j as WifishState;
+  return j as T;
 }
 
 /** Change settings of one channel; resolves to the resulting plugin state. */
 export const setChannel = (ch: ChannelName, patch: ChannelPatch) => post(`/channel/${ch}`, patch);
 /** Change sonar system settings; resolves to the resulting plugin state. */
 export const setSystem = (patch: SystemPatch) => post('/system', patch);
+/** Save display units on the plugin for every viewer; resolves to the units now kept. */
+export const setDisplay = (patch: DisplayPrefs) => post<DisplayPrefs>('/display', patch);

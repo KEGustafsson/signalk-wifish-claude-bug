@@ -44,6 +44,17 @@ export interface WifishState {
   active: Record<ChannelName, boolean>;
 }
 
+/**
+ * Display units picked in the web app. The plugin keeps them for every viewer, so the
+ * choice is the same on every browser and device and survives restarts. A missing key
+ * has not been picked yet (the viewer uses its own default).
+ */
+export interface DisplayPrefs {
+  /** null = follow the sonar's own depth unit. */
+  depthUnit?: 'ft' | 'm' | 'fa' | null;
+  tempUnit?: 'C' | 'F';
+}
+
 /** One echogram column, sent as SSE event "col". */
 export interface ColumnMessage {
   ch: ChannelName;
