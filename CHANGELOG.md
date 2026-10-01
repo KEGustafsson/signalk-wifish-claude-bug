@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fix the web app icon missing from the Signal K admin web app list: `appIcon` is
+  resolved relative to `public/`, so it now points to `./icon.svg`.
+
 ## 0.2.0
 
 - Signal K server plugin (TypeScript): discovers a Wi-Fish / Dragonfly Pro on the
