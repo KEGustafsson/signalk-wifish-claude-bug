@@ -181,6 +181,15 @@ seq is newer. A passive depth reader never needs to send them. (This project
 patches a copy of the received datagram so unknown bytes survive; the app
 re-encodes from fields and, due to a bug, writes byte 72 back to off 73.)
 
+The commands go over UDP and are not acknowledged; the device's next broadcast
+is the only confirmation. This project therefore keeps the device's copy and
+its own unconfirmed change apart: the change is shown at once and becomes the
+held copy when the device broadcasts a seq at least as new. While the device
+keeps broadcasting the older seq, the command is resent (up to 3 sends, 1 s
+apart); after that its own values are shown again. Without any broadcast there
+is no evidence either way and the change stays shown. Depth conversions always
+use the device's confirmed transducer offset, since the device applies it.
+
 ### Sonar channel ("ping parameters") — 0x270102, exactly 94 bytes
 One message per ping configuration (index 0‥31); the Sensitivity settings go to
 the configuration of the channel being adjusted, Range settings to both channels'.

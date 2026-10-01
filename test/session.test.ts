@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { Sonar4Session, type SessionColumn } from '../src/session';
+import { Sonar4Session, MAX_SENDS, RESEND_MS, type SessionColumn } from '../src/session';
 import { MsgId, CS, SS, parseChannelSettings, parseSystemSettings } from '../src/sonar4';
 import { msg, segment, results, channelSettings, systemSettings } from './helpers';
 
@@ -136,9 +136,88 @@ describe('Sonar4Session', () => {
     expect(a).toMatchObject({ index: 0, seq: 7, rangeAuto: false, rangeDeepCm: 3000, contrast: 0 });
     expect(b).toMatchObject({ index: 1, seq: 10, rangeAuto: false, rangeDeepCm: 3000, contrast: 20 });
     expect(Buffer.from(range[1])[73]).toBe(0xab);
-    // Our own echo (same seq) doesn't undo the local change.
-    s.handle(channelSettings(0, 7, { gain: 50 }));
+    // The second command was built on the first, unconfirmed one: it keeps gain 80.
+    expect(a.gain).toBe(80);
     expect(s.channelSettings(0)!.gain).toBe(80);
+    // A broadcast at our seq is the sonar's truth, here another client's change.
+    s.handle(channelSettings(0, 7, { gain: 50 }));
+    expect(s.channelSettings(0)!.gain).toBe(50);
+  });
+
+  describe('unconfirmed settings changes', () => {
+    /** Session holding configuration 0 at seq 5, gain 10. */
+    const held = () => {
+      const s = new Sonar4Session();
+      s.handle(channelSettings(0, 5, { gain: 10 }));
+      return s;
+    };
+
+    test('are shown at once and confirmed by the sonar broadcasting them', () => {
+      const s = held();
+      s.buildChannelCommands(0, { gain: 80 }, 0);
+      expect(s.channelSettings(0)!.gain).toBe(80);
+      expect(s.pending).toBe(true);
+      s.handle(channelSettings(0, 6, { gain: 80 }));
+      expect(s.pending).toBe(false);
+      expect(s.retryPending(5000)).toEqual([]);
+    });
+
+    test('are sent again while the sonar keeps reporting older settings, then given up', () => {
+      const s = held();
+      const seen: number[] = [];
+      s.on('channelSettings', (c) => seen.push(c.gain));
+      const warns: string[] = [];
+      s.on('warn', (m) => warns.push(m));
+      const [cmd] = s.buildChannelCommands(0, { gain: 80 }, 0);
+      s.handle(channelSettings(0, 5, { gain: 10 })); // lost: the sonar still has seq 5
+      expect(s.channelSettings(0)!.gain).toBe(80);
+      expect(s.retryPending(100)).toEqual([cmd]); // stale: resend at once, same datagram
+      s.handle(channelSettings(0, 5, { gain: 10 }));
+      expect(s.retryPending(200)).toEqual([cmd]);
+      s.handle(channelSettings(0, 5, { gain: 10 }));
+      expect(s.retryPending(300)).toEqual([]); // third send unanswered: back to the sonar's values
+      expect(s.channelSettings(0)!.gain).toBe(10);
+      expect(s.pending).toBe(false);
+      expect(seen).toEqual([80, 10]);
+      expect(warns.join()).toMatch(/did not apply/);
+    });
+
+    test('resend after RESEND_MS without evidence, and stay shown when the sonar is silent', () => {
+      const s = held();
+      s.buildChannelCommands(0, { gain: 80 }, 0);
+      expect(s.retryPending(RESEND_MS - 1)).toHaveLength(0);
+      expect(s.retryPending(RESEND_MS)).toHaveLength(1);
+      expect(s.retryPending(2 * RESEND_MS)).toHaveLength(1);
+      expect(s.retryPending(10 * RESEND_MS)).toHaveLength(0); // MAX_SENDS reached
+      expect(s.channelSettings(0)!.gain).toBe(80);
+      // A late echo still confirms it.
+      s.handle(channelSettings(0, 6, { gain: 80 }));
+      expect(s.pending).toBe(false);
+      expect(MAX_SENDS).toBe(3);
+    });
+
+    test('system settings follow the same rules', () => {
+      const s = new Sonar4Session();
+      s.handle(systemSettings(3, 0));
+      s.buildSystemCommand({ transducerOffsetCm: 40 }, 0);
+      expect(s.system!.transducerOffsetCm).toBe(40);
+      for (let i = 1; i <= 3; i++) {
+        s.handle(systemSettings(3, 0));
+        s.retryPending(i * 10);
+      }
+      expect(s.system!.transducerOffsetCm).toBe(0);
+      s.buildSystemCommand({ transducerOffsetCm: 40 }, 100);
+      s.handle(systemSettings(4, 40));
+      expect(s.pending).toBe(false);
+      expect(s.system!.transducerOffsetCm).toBe(40);
+    });
+
+    test('a reconnect forgets them', () => {
+      const s = held();
+      s.buildChannelCommands(0, { gain: 80 }, 0);
+      s.reset();
+      expect(s.pending).toBe(false);
+    });
   });
 
   test('system command needs the device settings first', () => {

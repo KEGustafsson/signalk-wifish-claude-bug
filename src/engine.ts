@@ -127,7 +127,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     if (this.#running || this.#stopped) return; // listeners are gone after stop(); make a new Engine
 
     this.#running = true;
-    this.#watchdog = setInterval(() => this.#checkStale(), 1000);
+    this.#watchdog = setInterval(() => { this.#checkStale(); this.#resendPending(); }, 1000);
     this.transport.start();
   }
 
@@ -241,7 +241,8 @@ export class Engine extends EventEmitter<EngineEvents> {
   #depth(cm: number | null, force = false): void {
     if (!this.#opts.emitDepth) return;
     if (cm === null && this.#depthPaths.size === 0) return; // nothing published yet, nothing to clear
-    const offset = this.session.system?.transducerOffsetCm ?? 0;
+    // The sonar applies its own offset to the depth it reports: use its confirmed value, not a pending change.
+    const offset = this.session.deviceSystem?.transducerOffsetCm ?? 0;
     const values = depthValues(cm, offset);
     // A path that no longer applies (offset changed sign or went to 0) gets a final null,
     // otherwise the server would keep showing its last value.
@@ -272,6 +273,12 @@ export class Engine extends EventEmitter<EngineEvents> {
       this.#stateChanged(true);
     }
     this.#stale = quiet;
+  }
+
+  /** Send settings changes the sonar has not confirmed yet again (UDP may have dropped them). */
+  #resendPending(): void {
+    if (!this.transport.canSend || !this.session.pending) return;
+    for (const m of this.session.retryPending()) this.transport.send(m);
   }
 
   /** No trustworthy readings any more: publish null depth and temperature, blank the display. */
@@ -305,7 +312,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** Turn a session column into a ColumnMessage, append it to the channel's capped history and emit it. */
   #column(c: SessionColumn): void {
     const ch = NAMES[c.channel];
-    const offset = this.session.system?.transducerOffsetCm ?? 0;
+    const offset = this.session.deviceSystem?.transducerOffsetCm ?? 0;
     const bottom = this.session.bottomCm;
     const msg: ColumnMessage = {
       ch,

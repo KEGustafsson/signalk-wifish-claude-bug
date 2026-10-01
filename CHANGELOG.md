@@ -28,6 +28,9 @@
   incremental echogram rendering, keyboard and screen-reader support in dialogs.
 - Depth and temperature units picked in the web app are kept by the plugin and shared
   by every viewer, so the choice is remembered across browsers, devices and restarts.
+- Settings changes are confirmed against the sonar's broadcasts: a lost command is
+  resent, and one the sonar does not apply falls back to its own values instead of
+  showing a setting the sonar never took.
 - Signal K plugin CI workflow; tests moved to vitest.
 
 ## 0.1.0

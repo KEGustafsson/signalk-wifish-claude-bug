@@ -2,7 +2,7 @@ import { describe, test, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Engine } from '../src/engine';
 import { DemoDevice } from '../src/demo';
-import { MsgId, parseChannelSettings } from '../src/sonar4';
+import { MsgId, messageId, parseChannelSettings } from '../src/sonar4';
 import type { Transport, TransportEvents } from '../src/transport';
 import type { Delta } from '../src/signalk';
 import { msg, results, segment, channelSettings, systemSettings } from './helpers';
@@ -57,6 +57,31 @@ describe('Engine', () => {
     deltas.length = 0;
     t.feed(systemSettings(3, -30));
     expect(deltas.flatMap((d) => d.updates[0].values)).toContainEqual({ path: 'environment.depth.belowKeel', value: 10.5 });
+    e.stop();
+  });
+
+  test('an offset change counts for depth only once the sonar confirms it; the watchdog resends it', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'Date', 'performance'] });
+    const t = new FakeTransport();
+    const deltas: Delta[] = [];
+    const e = new Engine(t, { onDelta: (d) => deltas.push(d) });
+    e.start();
+    t.feed(systemSettings(1, 0));
+    t.feed(msg(MsgId.BOTTOM, 22, (b) => b.writeInt32LE(1050, 17)));
+    deltas.length = 0;
+    expect(e.setSystem({ transducerOffsetCm: 50 })).toBeNull();
+    expect(e.state().system!.transducerOffsetCm).toBe(50); // shown at once
+    const paths = () => deltas.flatMap((d) => d.updates[0].values).map((v) => v.path);
+    t.feed(msg(MsgId.BOTTOM, 22, (b) => b.writeInt32LE(1060, 17)));
+    expect(paths()).not.toContain('environment.depth.belowSurface');
+    // Lost on the way: the sonar keeps its seq 1 settings, the watchdog sends ours again.
+    t.sent.length = 0;
+    t.feed(systemSettings(1, 0));
+    vi.advanceTimersByTime(1000);
+    expect(t.sent.filter((b) => messageId(b) === MsgId.SYS_SETTINGS)).toHaveLength(1);
+    t.feed(systemSettings(2, 50)); // applied
+    t.feed(msg(MsgId.BOTTOM, 22, (b) => b.writeInt32LE(1070, 17)));
+    expect(paths()).toContain('environment.depth.belowSurface');
     e.stop();
   });
 
