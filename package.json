@@ -44,7 +44,7 @@
     "depth"
   ],
   "signalk": {
-    "appIcon": "./public/icon.svg",
+    "appIcon": "./icon.svg",
     "displayName": "Wi-Fish Sonar",
     "screenshots": [
       "./docs/screenshot.jpg",
