@@ -50,7 +50,8 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
   #ctrl: dgram.Socket | null = null;
   #service: Announce | null = null;
   #iface: string | null = null;
-  #hasUnit = false;
+  /** The sonar's unit message; kept until a session starts, which resets the decoder state. */
+  #unit: Uint8Array | null = null;
   #timer: NodeJS.Timeout | null = null;
   #retry: NodeJS.Timeout | null = null;
   #rescan: NodeJS.Timeout | null = null;
@@ -184,9 +185,9 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
       this.#service = s;
       this.#maybeStart();
     } else if (id === MsgId.UNIT) {
-      this.#hasUnit = true;
-      this.#rx(b);
-      this.#maybeStart();
+      this.#unit = Uint8Array.from(b);
+      if (this.#timer) this.#rx(b); // during a session: pass it on; before one, #maybeStart replays it
+      else this.#maybeStart();
     } else if (id !== null && id >>> 8 === 0x2701) {
       this.#rx(b); // sonar data on the discovery group:port
     }
@@ -210,13 +211,15 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
   /** Once the announcement and unit message are both in, open the data and control sockets and start ticking. */
   #maybeStart(): void {
     const s = this.#service;
-    if (!s || !this.#hasUnit || this.#timer) return;
+    if (!s || !this.#unit || this.#timer) return;
     const iface = this.#ifaceFor(s.device);
     if (!iface) { this.#log(`no local interface on the subnet of ${s.device}; set the interface option`); return; }
     this.#iface = iface;
     this.#log(`sonar ${s.device}, data ${s.group}:${s.port}, control port ${s.ctrlPort}, via ${iface}`);
     this.#lastRx = this.#sessionAt = mono();
     this.#setLink('connecting', `Connecting to ${s.device}`);
+    // 'connecting' resets the session state: hand it the unit message again.
+    this.#rx(this.#unit);
 
     if (s.port === DISCOVERY.port) {
       // Same port as discovery: a second socket would receive every datagram twice.
@@ -270,6 +273,6 @@ export class DeviceTransport extends EventEmitter<TransportEvents> implements Tr
       try { this.#disc?.dropMembership(s.group, this.#iface); } catch { /* not joined */ }
     }
     this.#service = null;
-    this.#hasUnit = false;
+    this.#unit = null;
   }
 }
